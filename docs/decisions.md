@@ -347,6 +347,52 @@ Resolution method is general, not hardcoded answers: exact `P:` match → `provi
 
 ---
 
+## 2026-06-13 — Session 2 (cont.): class A/D loop built + deterministic half validated
+
+### Modules (two beyond §5's list, each justified)
+- `agent/dockerfile.py` — minimal Dockerfile model: parse stages, apply the LLM's bounded edit
+  ops, render. Resolves `FROM $BASE_IMAGE` against a preceding `ARG …=default` (the phantom base
+  is hidden behind the ARG), and computes a stage's dependency closure (`reachable_from`) so we
+  act only on the stages the build target needs.
+- `agent/build_runner.py` — `docker buildx` + log capture; `build(target=…)`; `image_exists()`
+  **real registry probe** (turns dfc's "phantom base" from a guess into a fact); `gather_signals()`
+  scoped to the target's closure; `BuildResult.signature()` (failure fingerprint for escalation).
+- `agent/verifier.py` — non-root (inspect) + healthcheck (boot + run upstream's Go binary) +
+  grype gate. Gate = **0 OS/runtime-layer Criticals** (the layer we control); npm-layer reported,
+  not gated (Chainguard Libraries' domain, out of scope) — matches the locked report semantics.
+- `agent/forge_agent.py` — the loop + the two added files above. `agent/llm.py` is the sole API seam.
+
+### Key structural findings (run, not assumed — §10)
+- Upstream `Dockerfile.upstream` is **multi-target**; buildx defaults to the *last* stage
+  (`upload-artifact`, a GitHub-release helper). The runtime is the **`release`** ("⭐ Main Image")
+  stage → the agent builds `--target release`. Its closure is exactly `{build, build_healthcheck,
+  release}`; the other stages (rootless/nightly/pr-test2/upload-artifact) are ignored.
+- `release`'s phantom base is behind `ARG BASE_IMAGE=cgr.dev/chainguard/uptime-kuma:latest` — ARG
+  resolution surfaces it; the registry probe confirms **all 3** reachable bases are phantom.
+
+### `--dry-run` (deterministic: dfc convert → build → signals, no API key) — GREEN
+Real run: `--target release` build fails on the phantom base (cgr.dev token-fetch error for the
+nonexistent `chainguard/uptime-kuma` repo); signals correctly report the 3 phantom bases,
+`runtime_stage=release`, `runtime_user=null` (base default). This is the exact class-A input the
+LLM will diagnose. The whole deterministic half is wired and validated end-to-end.
+
+### Loop semantics (as built)
+Per-failure-signature model ladder: Sonnet first; if it yields no in-scope (A/B/D) edits, escalate
+to Opus **inline** (no wasted rebuild); if a fix applies but the rebuild keeps the *same*
+signature, the next iteration escalates that diagnosis to Opus; if both models are exhausted on one
+signature → loud stop. Out-of-scope diagnoses (e.g. a Go-compile step the LLM must NOT author) stop
+as a **documented touch-up boundary**, not a silent failure. Every fix + escalation is recorded in
+`agent-provenance.md` with model attribution ("agent-generated with N documented touch-ups").
+
+### ⏸ PAUSED before first live LLM run (owner instruction)
+Deterministic half proven; the live loop needs `ANTHROPIC_API_KEY` in the env. Awaiting owner
+confirmation the key is set, then: `.venv/bin/python -m agent.forge_agent`. Expected honest
+outcome: agent autonomously flattens the 3 phantom bases (class A) and restores non-root if needed
+(class D), then likely hits a touch-up boundary at the healthcheck Go-compile / dumb-init steps the
+converted file lacks (the LLM must not author those) — reported as documented touch-ups.
+
+---
+
 ## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
@@ -386,12 +432,12 @@ real grype/syft, regen via `scripts/gen_report.py`):
   format). Round-trip proven: `dfc --mappings=… --warn-missing-packages` reports **0** unmapped;
   buckets **5 mapped / 8 already-correct / 3 no-equivalent**. Deterministic; LLM seam present but
   unused for this target (residuals correctly land no-equivalent).
-- **Class A + D — NEXT.** The bounded build→diagnose→fix→rebuild loop (`forge_agent`, `build_runner`,
-  `verifier`) flattening the phantom base image and restoring non-root, with the LLM doing
-  log-diagnosis + structured edit-op drafting (never whole Dockerfiles). dfc/build/scan/sign/report
-  stay deterministic. Python, clean/idiomatic, ~5-iter cap, loud failure. Don't expand scope (§2).
-- **Pending before A-loop:** LLM model choice (sonnet-4-6 vs opus-4-8); `pip install anthropic`;
-  `ANTHROPIC_API_KEY` in env.
+- **Class A + D — BUILT, deterministic half validated, ⏸ paused for the live run.** Loop
+  (`forge_agent` + `dockerfile`/`build_runner`/`verifier`, LLM seam `llm.py`) done; `--dry-run`
+  (dfc convert → `--target release` build → signals, no key) is green and surfaces the 3 phantom
+  bases via real registry probe. Sonnet→Opus one-hop escalation with model-attributed provenance.
+  **Next action:** owner sets `ANTHROPIC_API_KEY`, then `.venv/bin/python -m agent.forge_agent`
+  for the first live run (paused here per owner instruction). venv at `.venv` (anthropic 0.109.1).
 
 **Read first (in order):**
 1. `CONTEXT.md` — purpose, honesty guardrails (§2), architecture (§4), build order (§6).
