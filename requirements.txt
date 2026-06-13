@@ -1,0 +1,5 @@
+# forge agent runtime deps (Python). Install into a venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# The Claude API is used only for the agent's log-diagnosis + fix-drafting (CONTEXT §4);
+# anthropic pulls its own transitive deps (httpx, pydantic, …).
+anthropic==0.109.1

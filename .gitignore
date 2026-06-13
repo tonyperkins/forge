@@ -2,3 +2,7 @@
 /build/
 # Local scan/SBOM scratch
 /.scan/
+# Python venv for the agent
+/.venv/
+__pycache__/
+*.pyc

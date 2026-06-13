@@ -330,11 +330,20 @@ Resolution method is general, not hardcoded answers: exact `P:` match → `provi
 - dfc confirmed (decisions Session 1) to pass these names through **unmapped** — the resolver's
   value is real, and its `mappings.yaml` is consumable by `dfc --mappings`.
 
-### Still pending
-- **LLM model choice** (sonnet-4-6 vs opus-4-8) — to be raised before wiring `agent/llm.py`. The
-  deterministic resolver resolves this target fully without the LLM; LLM is the documented path for
-  ambiguous residuals (always index-validated, so it cannot corrupt the no-equivalent bucket).
-- `anthropic` SDK not installed; `ANTHROPIC_API_KEY` not set — owner to provide before first A-loop run.
+### LLM model tiering (owner decision) — Sonnet default, Opus one-hop escalation
+- `agent/llm.py` holds two swappable constants: `MODEL` = `claude-sonnet-4-6` (default for all
+  diagnosis/adjudication) and `ESCALATION_MODEL` = `claude-opus-4-8`.
+- **Escalation rule (one hop, no creep):** if a Sonnet-drafted fix fails to *improve* the build
+  (same failure signature after rebuild), the *same* diagnosis is re-run once on Opus. If Opus also
+  fails to move it, the existing bounded-loop/loud-failure path takes over — NOT a new retry
+  framework, NOT multi-model voting. It is a single model-selection branch in the loop.
+- **Provenance is mandatory (else §2 violation):** every escalation is a logged line with model
+  attribution — e.g. "class A diagnosis escalated sonnet-4-6 → opus-4-8 after the Sonnet fix failed
+  to resolve build error X." This makes the tiering a *demonstrated* cost-engineering decision
+  ("Sonnet handled N fixes; Opus escalated M times on structural diagnosis, here's when/why") rather
+  than a hidden detail. A flat "Sonnet-powered" claim without visible escalation would misrepresent.
+- `pip install anthropic` approved. `ANTHROPIC_API_KEY` to be set by owner before the first live
+  A-loop run — **pause for that confirmation once the loop is built** (owner instruction).
 
 ---
 
