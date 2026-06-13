@@ -265,3 +265,21 @@ Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.
 ### Post-green TODO
 - Make the ghcr package **public** (separate from the private repo) so anyone can pull+verify.
 - Capture `cosign verify` output for the owner before discussing the agent.
+
+### ✅ Pipeline runs GREEN (run 27474323485) — Saturday exit criterion met
+- All 15 steps succeeded: build+push (amd64) → keyless sign → SBOM(SPDX)+attest →
+  grype scan+attest → **cosign verify + verify-attestation gate passed** → CVE summary.
+- Signed image digest: `sha256:99af11714682058f169b7b83d957836caaa6c956ea1d74291e5c190591badfe2`
+  (`ghcr.io/tonyperkins/uptime-kuma:latest`).
+- `cosign verify` reported all three checks: cosign claims validated, **transparency-log
+  (Rekor) existence verified offline**, code-signing cert verified via trusted CA. Identity
+  `https://github.com/tonyperkins/forge/.github/workflows/forge.yml@refs/heads/main`, issuer
+  `https://token.actions.githubusercontent.com`. SBOM (spdxjson) and vuln attestations both
+  verified. Three attestations attached: `spdx.dev/Document`, `cosign.../vuln/v1`, `sign/v1`.
+- Two fixes to first-run: `sigstore/cosign-installer` has no moving `v4` tag → pinned `v4.1.2`;
+  `grype --file` ambiguous with `-o json` → used `-o json=FILE`.
+- Non-blocking: `actions/upload-artifact@v4` warns about Node20 runtime (deprecation only).
+- **Remaining (owner action — gh token lacks `write:packages`):** flip the ghcr package to
+  Public (Package settings → Change visibility), or `gh auth refresh -s write:packages` and I'll
+  script it. Until then the image is private (still verifiable when authenticated; the CI gate
+  proves it). README verify command depends on it being public.
