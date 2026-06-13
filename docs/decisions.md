@@ -223,3 +223,45 @@ Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.
 - **cosign keyless signing + the `.github/workflows/forge.yml`** (build→SBOM→scan→sign→report).
   Keyless signing needs registry + OIDC, so it's wired in CI (GitHub OIDC), not run locally.
   Paused here per "pause after the first real diff so I can see the actual numbers".
+
+---
+
+## 2026-06-13 — Session 1 (cont.): CI pipeline (build→sign→attest→verify→report)
+
+### Owner decisions
+- Wire CI next to **close the supply-chain loop before the agent** — signing is the one step
+  that can't be shown locally and is the most on-thesis (verifiable provenance). Banks a whole,
+  presentable, publicly-verifiable artifact = Saturday's exit criterion.
+- **ghcr images public under the owner's GitHub identity = conscious yes.**
+- **SBOM must be an attached, signed `cosign attest` attestation, not a loose JSON** (the
+  Chainguard-shaped artifact). Same for scan results.
+
+### `.github/workflows/forge.yml` design
+- Push to `main` → build `Dockerfile.hardened` (context = upstream checkout pinned to
+  `8d36977`) → push `ghcr.io/<owner>/uptime-kuma` (amd64) → `cosign sign` →
+  `syft -o spdx-json` + `cosign attest --type spdxjson` → `grype -o json` +
+  `cosign attest --type vuln` → `cosign verify` + `verify-attestation` (hard gate) →
+  CVE decomposition to the job summary + SBOM/scan uploaded as artifacts.
+- **Keyless** throughout: `id-token: write` → GitHub OIDC → Fulcio cert → Rekor tlog. No keys.
+- `provenance: false, sbom: false` on build-push-action so the pushed artifact is a **single
+  image manifest** (not a buildkit attestation manifest *list*) — cosign then signs/attests the
+  image digest directly; we attach our **own** cosign attestations instead.
+- Identity for verify = `https://github.com/<repo>/.github/workflows/forge.yml@refs/heads/main`,
+  issuer `https://token.actions.githubusercontent.com`. (This is why the pipeline runs on
+  `main`, not a branch — the keyless cert SAN is branch-specific.)
+
+### Validated before committing (run, don't hypothesize)
+- syft `-o spdx-json=FILE` → valid SPDX-2.3 (870 pkgs); grype `-o json=FILE` works.
+- **cosign v3 flag change caught locally:** `--tlog-upload=false` now conflicts with the default
+  signing-config — irrelevant for CI (keyless *wants* the Rekor upload), but confirms not to
+  copy old `--tlog-upload=false` snippets. Verified the v3 keyless flag surface
+  (`sign --yes`, `attest --type/--predicate`, `verify[-attestation] --certificate-identity*
+  --certificate-oidc-issuer`).
+- Size metrics are intentionally **local-report-only**: `docker inspect .Size` means compressed
+  under our containerd store but uncompressed on GH runners (overlay2) — not portable, so CI
+  reports the portable CVE decomposition (from grype JSON), and `docs/cve-report.md` stays the
+  canonical size source.
+
+### Post-green TODO
+- Make the ghcr package **public** (separate from the private repo) so anyone can pull+verify.
+- Capture `cosign verify` output for the owner before discussing the agent.

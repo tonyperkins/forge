@@ -1,0 +1,139 @@
+name: forge
+
+# Convert-build-attest pipeline for the hardened uptime-kuma image (CONTEXT §6 step 2).
+# Single-arch amd64 for now; arm64 is added later on a dedicated release job (CI time).
+#
+# Loop: build → push (ghcr) → SBOM (syft) → scan (grype) → keyless sign + signed
+# attestations (cosign) → verify (gate) → CVE report into the job summary.
+# Signing/attesting is keyless: GitHub's OIDC token (id-token: write) → Fulcio cert →
+# Rekor transparency log. No private keys anywhere.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "targets/uptime-kuma/**"
+      - "scripts/**"
+      - ".github/workflows/forge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # push image + cosign signatures/attestations to ghcr
+  id-token: write   # keyless OIDC (Fulcio)
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/uptime-kuma
+  UPSTREAM_REPO: louislam/uptime-kuma
+  # Pinned upstream source commit (uptime-kuma 2.4.0) — same commit the local build used.
+  UPSTREAM_REF: 8d36977569730b430c269c73c2e4d528e02ecc56
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout forge
+        uses: actions/checkout@v6
+
+      - name: Checkout upstream uptime-kuma (pinned) into build context
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_REF }}
+          path: build/uptime-kuma
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: build/uptime-kuma
+          file: targets/uptime-kuma/Dockerfile.hardened
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          # Keep a single image manifest (no buildkit attestation manifest list) so cosign
+          # signs/attests the image digest directly. We attach our own cosign attestations.
+          provenance: false
+          sbom: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Install syft + grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sh -s -- -b "$HOME/.local/bin"
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve pushed image digest
+        id: ref
+        run: echo "img=${IMAGE}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image (keyless)
+        run: cosign sign --yes "${{ steps.ref.outputs.img }}"
+
+      - name: SBOM (syft, SPDX) + signed attestation
+        run: |
+          syft "registry:${{ steps.ref.outputs.img }}" -o spdx-json=sbom.spdx.json --source-name uptime-kuma
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "${{ steps.ref.outputs.img }}"
+
+      - name: Scan (grype) + signed vuln attestation
+        run: |
+          grype "registry:${{ steps.ref.outputs.img }}" -o json=grype.json
+          cosign attest --yes --type vuln --predicate grype.json "${{ steps.ref.outputs.img }}"
+
+      - name: Verify signature + attestations (gate)
+        env:
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/forge.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          echo "::group::cosign verify (signature)"
+          cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "${{ steps.ref.outputs.img }}"
+          echo "::endgroup::"
+          echo "::group::cosign verify-attestation (SBOM, spdxjson)"
+          cosign verify-attestation --type spdxjson --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "${{ steps.ref.outputs.img }}" > /dev/null
+          echo "SBOM attestation verified"
+          echo "::endgroup::"
+          echo "::group::cosign verify-attestation (vuln scan)"
+          cosign verify-attestation --type vuln --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "${{ steps.ref.outputs.img }}" > /dev/null
+          echo "vuln attestation verified"
+          echo "::endgroup::"
+
+      - name: CVE report → job summary
+        run: |
+          {
+            echo "## forge — signed hardened image"
+            echo ""
+            echo "**Image:** \`${{ steps.ref.outputs.img }}\`"
+            echo ""
+            python3 scripts/cve_summary.py grype.json "forge hardened uptime-kuma (this build)"
+            echo ""
+            echo "> Signed keyless (Fulcio + Rekor); SBOM (SPDX) and scan attached as signed cosign attestations."
+            echo "> Verify locally:"
+            echo '> ```'
+            echo "> cosign verify --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.*' \\"
+            echo ">   --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo ">   ${IMAGE}:latest"
+            echo '> ```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SBOM + scan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-scan
+          path: |
+            sbom.spdx.json
+            grype.json
+          if-no-files-found: error
