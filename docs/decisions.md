@@ -286,6 +286,58 @@ Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.
 
 ---
 
+## 2026-06-13 — Session 2: agent plan signed off + class-B framing
+
+### Plan approved (CONTEXT §6 step 3, scope A/B/D)
+- Module layout per §5: `forge_agent` (loop), `dfc_runner`, `wolfi_resolver`, `build_runner`,
+  `verifier`; report reused from `scripts/`. **One added module `agent/llm.py`** — the only file
+  that calls the Claude API, so the §4 boundary (LLM = diagnosis + fix-drafting only) is auditable
+  in one place. Two LLM call sites: `diagnose()` (build-failure → structured *edit ops*, never a
+  whole Dockerfile) and `adjudicate_wolfi()` (ambiguous package-name only).
+- Loop (forge_agent): dfc convert once → for ≤5 iters {build → gather deterministic signals
+  (registry probe / apk-error parse / USER scan) → LLM `diagnose` → apply edit ops → rebuild},
+  scope-guard rejects any class outside A/B/D, loud diagnostic dump on exhaustion → verify
+  (non-root + healthcheck + grype gate) → hand the generated `Dockerfile.agent` to the EXISTING
+  `forge.yml` (unchanged) → emit fix-provenance (autonomous vs manual touch-up).
+
+### Class B = conversion-analysis capability, NOT an in-loop build fix (owner decision)
+- A is what actually breaks the uptime-kuma build; **B is demonstrated against the full upstream
+  package set** because the defensible-core scope removed those packages (only `dumb-init` survives,
+  which resolves cleanly → B would never fire in-loop). Do **not** restore packages to manufacture
+  an in-loop B failure (the option-2 trap, §2).
+- `wolfi_resolver` runs over the **real** upstream-base apt list (extracted from `dfc --json`
+  `run.packages`) and reports **three honest buckets**, one-line reason on every no-equivalent:
+  **mapped** (Debian→Wolfi rename) / **already-correct** (identical name exists) / **no Wolfi
+  equivalent** (genuinely unmappable). Never silently drop an unmappable package; never force a
+  wrong match. The no-equivalent bucket is where dfc's real limits live — surfacing it is more
+  defensible than claiming full coverage.
+
+### Wolfi index ground-truth (run, not assumed — §10), source `packages.wolfi.dev/os/x86_64`
+Resolution method is general, not hardcoded answers: exact `P:` match → `provides` lookup
+(`cmd:<name>`) → index-validated naming transforms (`fonts-`→`font-`, `python3-`→`py3-`, strip
+`-server`, hyphenated-parent) → LLM residual (index-validated) → else no-equivalent.
+- **mapped (5):** `iputils-ping`→`iputils` (provides `cmd:ping`), `sqlite3`→`sqlite` (provides
+  `cmd:sqlite3`; libs in `sqlite-libs`), `fonts-noto`→`font-noto`, `fonts-noto-cjk`→`font-noto-cjk`,
+  `mariadb-server`→`mariadb`.
+- **already-correct (8):** `ca-certificates`, `curl`, `dumb-init`, `nscd`, `sudo`, `util-linux`,
+  `chromium`, **`cloudflared`** — *correction*: the a-priori guess that cloudflared has no Wolfi
+  equivalent was **wrong**; `P:cloudflared` (provides `cmd:cloudflared`) is in the index. Exactly the
+  "verify before assuming" case (§10) — report the truth.
+- **no Wolfi equivalent (3):** `fonts-indic` (Debian metapackage of Indic fonts; Wolfi ships
+  individual families e.g. `font-lohit-*`, no single equivalent), `python3-paho-mqtt` (no paho-mqtt
+  Python binding packaged in Wolfi), `./apprise.deb` (local `.deb` *path*, not a repo name — apk
+  cannot install a `.deb`; dfc class C).
+- dfc confirmed (decisions Session 1) to pass these names through **unmapped** — the resolver's
+  value is real, and its `mappings.yaml` is consumable by `dfc --mappings`.
+
+### Still pending
+- **LLM model choice** (sonnet-4-6 vs opus-4-8) — to be raised before wiring `agent/llm.py`. The
+  deterministic resolver resolves this target fully without the LLM; LLM is the documented path for
+  ambiguous residuals (always index-validated, so it cannot corrupt the no-equivalent bucket).
+- `anthropic` SDK not installed; `ANTHROPIC_API_KEY` not set — owner to provide before first A-loop run.
+
+---
+
 ## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
@@ -319,9 +371,18 @@ real grype/syft, regen via `scripts/gen_report.py`):
   `@louislam/sqlite3` prebuilt N-API, no compile). Do not build for it. Do not switch targets
   to manufacture it (§2).
 
-**Next:** §6 step 3 — the agent. Scope locked to A/B/D. **Plan before code** (§4 architecture:
-LLM does log-diagnosis + fix-drafting; dfc/build/scan/sign/report stay deterministic). Python,
-clean/idiomatic, bounded loop (~5 iters, loud failure). Don't expand scope without asking (§2).
+**Next:** §6 step 3 — the agent. Scope locked to A/B/D. Plan signed off (see Session 2 entry).
+- **Class B — DONE & verified.** `agent/wolfi_resolver.py` (+ `agent/dfc_runner.py`) resolves the
+  upstream apt surface against the live Wolfi index → `targets/uptime-kuma/mappings.yaml` (dfc
+  format). Round-trip proven: `dfc --mappings=… --warn-missing-packages` reports **0** unmapped;
+  buckets **5 mapped / 8 already-correct / 3 no-equivalent**. Deterministic; LLM seam present but
+  unused for this target (residuals correctly land no-equivalent).
+- **Class A + D — NEXT.** The bounded build→diagnose→fix→rebuild loop (`forge_agent`, `build_runner`,
+  `verifier`) flattening the phantom base image and restoring non-root, with the LLM doing
+  log-diagnosis + structured edit-op drafting (never whole Dockerfiles). dfc/build/scan/sign/report
+  stay deterministic. Python, clean/idiomatic, ~5-iter cap, loud failure. Don't expand scope (§2).
+- **Pending before A-loop:** LLM model choice (sonnet-4-6 vs opus-4-8); `pip install anthropic`;
+  `ANTHROPIC_API_KEY` in env.
 
 **Read first (in order):**
 1. `CONTEXT.md` — purpose, honesty guardrails (§2), architecture (§4), build order (§6).
