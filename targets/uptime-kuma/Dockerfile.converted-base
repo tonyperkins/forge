@@ -1,0 +1,59 @@
+# Download Apprise deb package
+FROM cgr.dev/chainguard/node:22-dev AS download-apprise
+USER root
+WORKDIR /app
+COPY ./extra/download-apprise.mjs ./download-apprise.mjs
+RUN apk add --no-cache curl && \
+    npm install cheerio semver && \
+    node ./download-apprise.mjs
+
+# Base Image (Slim)
+# If the image changed, the second stage image should be changed too
+FROM cgr.dev/chainguard/node:22-dev AS base2-slim
+USER root
+ARG TARGETPLATFORM
+
+# Specify --no-install-recommends to skip unused dependencies, make the base much smaller!
+# sqlite3 = for debugging
+# iputils-ping = for ping
+# util-linux = for setpriv (Should be dropped in 2.0.0?)
+# dumb-init = avoid zombie processes (#480)
+# curl = for debugging
+# ca-certificates = keep the cert up-to-date
+# sudo = for start service nscd with non-root user
+# nscd = for better DNS caching
+RUN apk add --no-cache ca-certificates curl dumb-init iputils-ping nscd sqlite3 sudo util-linux
+
+# apprise = for notifications (Install from the deb package, as the stable one is too old) (workaround for #4867)
+# Switching to testing repo is no longer working, as the testing repo is not bookworm anymore.
+# python3-paho-mqtt (#4859)
+# TODO: no idea how to delete the deb file after installation as it becomes a layer already
+COPY --from=download-apprise /app/apprise.deb ./apprise.deb
+RUN apk add --no-cache ./apprise.deb python3-paho-mqtt && \
+    rm -f apprise.deb
+
+# Install cloudflared
+RUN curl https://pkg.cloudflare.com/cloudflare-main.gpg --output /usr/share/keyrings/cloudflare-main.gpg && \
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared bookworm main' | tee /etc/apt/sources.list.d/cloudflared.list && \
+    apk add --no-cache cloudflared && \
+    cloudflared version
+
+# For nscd
+COPY ./docker/etc/nscd.conf /etc/nscd.conf
+COPY ./docker/etc/sudoers /etc/sudoers
+
+# Debian bookworm does not have Let's Encrypt's Gen Y root certs.
+# Not sure if it is the best solution, and not sure if Debian will add them in the future, but for now we can just add them manually.
+RUN curl -fsSL https://letsencrypt.org/certs/gen-y/root-ye.pem -o /usr/local/share/ca-certificates/isrg-root-ye.crt && \
+    curl -fsSL https://letsencrypt.org/certs/gen-y/root-yr.pem -o /usr/local/share/ca-certificates/isrg-root-yr.crt && \
+    update-ca-certificates
+
+# Full Base Image
+# MariaDB, Chromium and fonts
+# Make sure to reuse the slim image here. Uncomment the above line if you want to build it from scratch.
+# FROM base2-slim AS base2
+FROM cgr.dev/chainguard/uptime-kuma:latest-dev AS base2
+USER root
+ENV UPTIME_KUMA_ENABLE_EMBEDDED_MARIADB=1
+RUN apk add --no-cache chromium fonts-indic fonts-noto fonts-noto-cjk mariadb-server && \
+    chown -R node:node /var/lib/mysql

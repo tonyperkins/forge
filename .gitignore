@@ -1,0 +1,4 @@
+# Upstream source clones (fetched at build time, not vendored)
+/build/
+# Local scan/SBOM scratch
+/.scan/

@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+#
+# Hardened, non-root uptime-kuma — "defensible core" (see docs/decisions.md 2026-06-13).
+# Pattern (CONTEXT §6): cgr.dev/chainguard/node:latest-dev (build) → distroless node (runtime).
+# Scope: uptime-kuma + node runtime + SQLite (@louislam/sqlite3), non-root. Excludes Chromium,
+# MariaDB, cloudflared, apprise, nscd/sudo (rationale in decisions.md / README).
+#
+# Bases are digest-pinned (CONTEXT §7 — never `latest` in a committed Dockerfile).
+# Build context is an upstream uptime-kuma checkout pinned to commit 8d36977.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1 — compile upstream's Go healthcheck, source UNCHANGED (CONTEXT §2: we run
+# their Go toolchain, we do not author Go). CGO off → static binary for distroless.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM cgr.dev/chainguard/go:latest-dev@sha256:c14a464b801730991755d178ad7e59f9756e72b585e98f2a24293588fae12ad1 AS healthcheck
+WORKDIR /src
+COPY extra/healthcheck.go ./healthcheck.go
+# Mirrors upstream's `go build -o extra/healthcheck extra/healthcheck.go`.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/healthcheck ./healthcheck.go
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 2 — build the Node app + Vue frontend.
+# NOTE (verified, see decisions.md): uptime-kuma 2.4 persists via @louislam/sqlite3,
+# which ships a prebuilt N-API (napi-v6) binary that runs on node 26 without compiling.
+# So NO native toolchain (python3/build-base) is needed — the better-sqlite3 "native
+# build fight" anticipated in CONTEXT §6 does not occur for this target. The only apk
+# we add is dumb-init (PID-1 init for the runtime), available in the curated repo.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM cgr.dev/chainguard/node:latest-dev@sha256:f2fab62fb18ddc1279344e7a05fb37169d4e3e12b9ca9a9048b408137a14618c AS build
+USER root
+RUN apk add --no-cache dumb-init
+
+WORKDIR /app
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
+# Install full deps first (dev included) — provides vite for the frontend build.
+# Layer-cached on lockfile changes only. No compilation step (prebuilt native binaries).
+COPY .npmrc package.json package-lock.json ./
+RUN npm ci --no-audit
+
+# App source + the compiled healthcheck binary.
+COPY . .
+COPY --from=healthcheck /out/healthcheck ./extra/healthcheck
+
+# Build the Vue frontend (dist/ is gitignored upstream), then drop dev deps. `npm prune`
+# keeps the already-compiled better-sqlite3 (a production dependency).
+RUN npm run build \
+ && npm prune --omit=dev \
+ && mkdir -p ./data
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 3 — distroless runtime. node:latest already defaults to non-root (uid 65532)
+# and ships TLS roots; we add only dumb-init (PID-1 reaping, matching upstream intent).
+# ─────────────────────────────────────────────────────────────────────────────
+FROM cgr.dev/chainguard/node:latest@sha256:27bf957bdf6d189108c8908c958fd966d9814f78e7172c2d791940f4e208a334 AS runtime
+WORKDIR /app
+LABEL org.opencontainers.image.title="uptime-kuma (forge hardened)" \
+      org.opencontainers.image.source="https://github.com/louislam/uptime-kuma" \
+      org.opencontainers.image.description="Hardened, non-root, SQLite-only uptime-kuma — Chainguard demo (forge)" \
+      org.opencontainers.image.licenses="MIT"
+
+ENV UPTIME_KUMA_IS_CONTAINER=1 \
+    NODE_ENV=production
+
+COPY --from=build --chown=node:node /app /app
+COPY --from=build /usr/bin/dumb-init /usr/bin/dumb-init
+
+USER 65532:65532
+EXPOSE 3001
+HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 \
+    CMD ["/app/extra/healthcheck"]
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["node", "server/server.js"]

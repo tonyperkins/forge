@@ -65,3 +65,114 @@ Ran on both files. Findings, grouped by failure class:
 **Next (pending owner input):** verify category B against the live Wolfi index, then begin
 the manual hardened multi-stage build (§6 step 1). Not started this session — paused after
 dfc baseline per session plan.
+
+---
+
+## 2026-06-13 — Session 1 (cont.): scope decision + hardened build path
+
+### Scope: defensible core, not full feature set (owner decision)
+Harden **uptime-kuma + node runtime + SQLite (better-sqlite3), non-root, multi-arch.**
+Minimizing attack surface *is* the point — a hardened image bundling Chromium/MariaDB/
+cloudflared would be a bad Chainguard image. Excluded, each with one-line rationale:
+- **MariaDB / mariadb-server** — SQLite is the default backend; MariaDB is optional
+  external-DB convenience, not core.
+- **Chromium + CJK fonts** (`chromium`, `fonts-indic`, `fonts-noto`, `fonts-noto-cjk`) —
+  only used by the screenshot feature; huge attack surface for a monitoring tool.
+- **cloudflared** — bundled tunnel convenience; orthogonal to monitoring, large surface.
+- **apprise** (`./apprise.deb`, `python3-paho-mqtt`) — one notification backend; uptime-kuma
+  has many native notification providers that need no extra OS packages.
+- **nscd, sudo** — Debian-shaped DNS-cache-via-sudo mechanism; irrelevant to a non-root
+  distroless image (glibc does its own resolution; no privilege-drop dance needed).
+- Each exclusion goes in the README too (the judgment is part of the demo).
+
+### dfc class C (apprise .deb) — closed
+`apk add ./apprise.deb` is invalid on Wolfi (apk can't install a Debian .deb) **and**
+apprise is out of scope. Logged, not solved. Done.
+
+### Go healthcheck — in scope, compiled not authored
+`extra/healthcheck.go` is a self-contained stdlib-only `package main` (no go.mod). Upstream
+builds it with `go build -o extra/healthcheck extra/healthcheck.go`. We replicate that
+unchanged in a `cgr.dev/chainguard/go:latest-dev` stage (`CGO_ENABLED=0` → static binary),
+then COPY the binary into the distroless runtime. Running their Go toolchain on upstream's
+code = in scope; authoring Go = not (§2). If it fights, stop and ask.
+
+### Verified build facts (run, not assumed)
+- Chainguard tags pull on the free tier: `node:latest` / `node:latest-dev` = **node v26.3.0**
+  (engines need ≥20.4.0 ✓), `go:latest-dev` = go 1.26.4, `wolfi-base:latest`.
+- Distroless `node:latest` **defaults to non-root** `node` uid/gid 65532 — non-root is the
+  base default, not something we bolt on. Node ships **120 TLS roots** built in → no extra
+  `ca-certificates` package needed for HTTPS monitoring.
+- **The curated free repo `apk.cgr.dev/chainguard` is minimal**: `build-base`, `dumb-init`,
+  `ca-certificates-bundle` present; **`python3`/`py3-setuptools` absent**, and `apk search`
+  returns nothing (resolvable-but-not-listable index). `curl`/`wget` not in it either.
+- node-gyp needs python3 to compile `better-sqlite3` (transitive via `redbean-node ~0.3.3`;
+  node 26 is too new for prebuilds → source compile expected, the §6 fight). So the builder
+  must add the **Wolfi OS repo** `packages.wolfi.dev/os` (Chainguard images are built from
+  Wolfi). There it resolves: `build-base python-3.13 py3.13-setuptools` (also tini/iputils/
+  util-linux/sqlite if later needed).
+- **Wolfi key handling (clean + reproducible):** copy `/etc/apk/keys/wolfi-signing.rsa.pub`
+  from the official `cgr.dev/chainguard/wolfi-base` image via `COPY --from` — no vendored
+  key, no build-time network fetch, fully digest-pinnable. (curl-based fetch ruled out: curl
+  isn't in the curated repo, chicken-and-egg with the key.)
+
+### Pinned base digests (this build)
+- go:latest-dev   `sha256:c14a464b801730991755d178ad7e59f9756e72b585e98f2a24293588fae12ad1`
+- node:latest-dev `sha256:f2fab62fb18ddc1279344e7a05fb37169d4e3e12b9ca9a9048b408137a14618c`
+- node:latest     `sha256:27bf957bdf6d189108c8908c958fd966d9814f78e7172c2d791940f4e208a334`
+- wolfi-base       `sha256:34977aa13765da89f60fee8fe5230e2bb1c55192df08e383c58221ee0d1277fb`
+
+### Build context
+Upstream source is cloned at the pinned commit (`8d36977`) into a gitignored working dir;
+not vendored into the repo. The committed artifacts are the Dockerfiles + this log. CI will
+clone the same way.
+
+### Deferred (documented caveat, not silently dropped)
+- **ping monitors / iputils** — ping needs raw sockets (`CAP_NET_RAW`), awkward for a non-root
+  distroless image. Getting the app building & running non-root (UI + HTTP monitoring +
+  SQLite persistence) comes first; ping is revisited with an explicit capability caveat.
+
+---
+
+## 2026-06-13 — Session 1 (cont.): manual hardened build WORKS + a premise correction
+
+### Outcome: `Dockerfile.hardened` builds & runs non-root ✓ (§6 step 1 met)
+- `docker buildx build` (amd64) succeeds. Container boots: node 26.3.0, uptime-kuma 2.4.0,
+  SQLite DB initializes, "Waiting for user action", serves HTTP 302 on :3001.
+- **Non-root verified**: image `USER 65532:65532`; PID-1 dumb-init, node, and the worker all
+  run as uid 65532. Non-root user can't write outside `/app/data` (EACCES).
+- **Healthcheck verified**: upstream's Go `healthcheck` (compiled unchanged in `go:latest-dev`,
+  static, CGO off) returns `Health Check OK [Res Code: 200]`, exit 0, inside the container.
+- Three committed Dockerfile variants now exist: `.upstream`, `.converted` (raw dfc output —
+  shows the phantom `cgr.dev/chainguard/uptime-kuma` images + dead apt-repo plumbing that
+  make naive dfc insufficient), `.hardened`.
+
+### ⚠ Premise correction (CONTEXT §6): there is NO better-sqlite3 native-build fight
+- uptime-kuma **2.4.0 does not use better-sqlite3.** It persists via **`@louislam/sqlite3`**
+  (v15.1.6) through knex. That package ships a **prebuilt N-API binary** (`napi-v6-linux-x64/
+  node_sqlite3.node`); N-API ABI stability means it loads on node 26 **without compiling**.
+- Verified: build log shows **0** node-gyp/gyp/prebuild compile events; only prebuilt `.node`
+  files exist in the image (`@louislam/sqlite3`, `oracledb` — both N-API prebuilts).
+- Consequence 1: the python3/build-base/Wolfi-repo toolchain I first added was **never used** —
+  removed it. Build stage now only `apk add dumb-init` (curated chainguard repo; Wolfi repo not
+  needed after all). The runtime image is **byte-identical** before/after the removal (same
+  digest) — clean multi-stage hygiene: build-only deps never reached the runtime.
+- Consequence 2 (**affects the agent's spec**): the **"native-module toolchain" failure class
+  in CONTEXT §4 is not exercised by this target.** The manual path did not produce it, so per
+  §6/§10 the agent must not speculatively implement it. The failure classes this target *does*
+  produce (the real agent scope) are: (A) phantom image-mapping / structural base-image
+  flattening, (B) apt→apk package-name misses, (D) USER-root → restore non-root. Native-toolchain
+  becomes documented "anticipated, did not occur" — honest README material, not a feature to fake.
+
+### Other honest notes
+- `cgr.dev/chainguard/node:latest` is **not fully shell-less**: it bundles busybox
+  (`/bin/sh → /bin/busybox`). Describe as minimal/distroless-style + non-root, not "shell-less".
+- Image size **590 MB** (amd64). Heavier than ideal: uptime-kuma bundles every knex DB driver
+  (e.g. `oracledb` carries 5 per-platform prebuilts) plus full i18n locale assets in `dist/`.
+  Trimming = future optimization; the real number to publish is the grype/size **diff vs the
+  upstream `louislam/uptime-kuma` image**, generated by the report step (not yet run).
+- Frontend `dist/` is gitignored upstream → the hardened build runs `npm run build` (vite)
+  itself, then `npm prune --omit=dev`, so the image is self-contained (no host pre-build).
+
+**Next (pending owner input):** the build goal is met. Before CI: decide how the §6 premise
+correction reshapes the agent scope, and whether to add a SBOM(syft)+scan(grype)+sign(cosign)
+pipeline next as planned. Paused here per "running non-root before we touch CI".
