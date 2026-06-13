@@ -283,3 +283,51 @@ Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.
   Public (Package settings → Change visibility), or `gh auth refresh -s write:packages` and I'll
   script it. Until then the image is private (still verifiable when authenticated; the CI gate
   proves it). README verify command depends on it being public.
+
+---
+
+## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
+
+Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
+
+**Status:** §6 step 1 (manual hardened non-root build) and step 2 (CI pipeline:
+build→SBOM→scan→cosign keyless sign→attest→verify→report) are both **green and banked**.
+
+**Signed artifact:** `ghcr.io/tonyperkins/uptime-kuma:latest`
+@ `sha256:99af11714682058f169b7b83d957836caaa6c956ea1d74291e5c190591badfe2`
+— keyless-signed (GitHub OIDC→Fulcio→Rekor), with **SBOM (spdxjson) + vuln attestations
+attached and verified**; `cosign verify` + both `verify-attestation` pass. Identity
+`…/forge/.github/workflows/forge.yml@refs/heads/main`, issuer `token.actions.githubusercontent.com`.
+
+**Open owner action (only one):** ghcr package is still **private** — flip to Public
+(Package settings → Change visibility) or `gh auth refresh -s write:packages`. Needed for
+public verifiability / README verify command; not blocking the agent.
+
+**Locked headline numbers** (vs upstream `2.4.0-slim-rootless`, the same-scope baseline;
+real grype/syft, regen via `scripts/gen_report.py`):
+- **OS/runtime-layer CVEs 507 → 0** (the layer hardening targets) — *this is the headline lead*.
+- Total 539 → 28 (95% fewer) — supporting context, not the lead.
+- npm/application layer 32 → 28 — out of scope (Chainguard Libraries' domain), **no credit claimed**.
+- Size 180 → 117 MB compressed (modest, reported straight).
+
+**Agent scope (LOCKED) — observed failure classes from the manual path = §4 A/B/D only:**
+- **A** — phantom image mapping / structural base-image flattening (dfc maps
+  `louislam/uptime-kuma:*` → nonexistent `cgr.dev/chainguard/uptime-kuma:*`).
+- **B** — apt→apk package-name misses (dfc passes names through unmapped).
+- **D** — `USER root` inserted for installs → restore non-root at runtime.
+- Native-module toolchain = **anticipated, did NOT occur** (uptime-kuma 2.4 uses
+  `@louislam/sqlite3` prebuilt N-API, no compile). Do not build for it. Do not switch targets
+  to manufacture it (§2).
+
+**Next:** §6 step 3 — the agent. Scope locked to A/B/D. **Plan before code** (§4 architecture:
+LLM does log-diagnosis + fix-drafting; dfc/build/scan/sign/report stay deterministic). Python,
+clean/idiomatic, bounded loop (~5 iters, loud failure). Don't expand scope without asking (§2).
+
+**Read first (in order):**
+1. `CONTEXT.md` — purpose, honesty guardrails (§2), architecture (§4), build order (§6).
+2. `docs/decisions.md` — this log (start at this anchor, then skim dated entries).
+3. `targets/uptime-kuma/Dockerfile.hardened` — the hand-walked path the agent automates.
+4. `targets/uptime-kuma/Dockerfile.converted` + `.converted-base` — raw dfc output showing
+   the A/B/D failures the agent must fix (phantom images, unmapped apk names, USER root).
+   Supporting: `Dockerfile.upstream` / `.upstream-base` (inputs), `scripts/gen_report.py` +
+   `cve_summary.py` (deterministic report), `.github/workflows/forge.yml` (pipeline).
