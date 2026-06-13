@@ -176,3 +176,50 @@ clone the same way.
 **Next (pending owner input):** the build goal is met. Before CI: decide how the §6 premise
 correction reshapes the agent scope, and whether to add a SBOM(syft)+scan(grype)+sign(cosign)
 pipeline next as planned. Paused here per "running non-root before we touch CI".
+
+---
+
+## 2026-06-13 — Session 1 (cont.): first real CVE/size diff (syft + grype)
+
+### Owner decisions logged
+- **Agent scope = A/B/D, stay with uptime-kuma.** Do NOT switch to changedetection.io to
+  manufacture a native-build failure (§2). Native-toolchain class = "anticipated, did not
+  occur for this target" — honest adaptation, README material, not a gap.
+- **Diff framing:** lead with the genuinely strong metric (CVE), present size plainly even if
+  modest; never force a size narrative this target can't support.
+
+### Comparison baseline (fairness)
+Compared our hardened image against upstream **`louislam/uptime-kuma:2.4.0-slim-rootless`**
+as the apples-to-apples baseline (same scope: slim — no Chromium/MariaDB/fonts — and non-root).
+Full `2.4.0` shown for context only; leading with it would overstate the win (it bundles
+Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.0.
+
+### Real numbers (grype/syft JSON under .scan/, regen via `scripts/gen_report.py`)
+- **Total CVEs: 539 → 28 (95% fewer) vs slim-rootless.** Critical 33 → 1, High 135 → 17.
+- **Honest decomposition (the real story):**
+  - **OS/runtime-layer CVEs: 507 → 0** — image hardening eliminated that entire layer (incl.
+    32 Critical, 117 High). This is the layer the project actually targets.
+  - **npm/application-layer CVEs: 32 → 28 — essentially unchanged, and that's correct.** Base
+    hardening doesn't patch an app's npm deps; that's **Chainguard Libraries'** domain, out of
+    scope. We claim no credit for it. Our 28 residual are 100% npm (protobufjs/grpc/tar/
+    minimatch/glob/lodash); the 1 Critical = `GHSA-xq3m-2v4x-88gg` in `protobufjs 7.2.6`.
+- **OS packages: 150 → 27 (82% fewer).** Total packages (syft): 1116 → 869 (npm counts close —
+  same app).
+- **Size (modest, reported straight):** compressed pull size 180 MB → **117 MB (35% smaller)**;
+  uncompressed 657 MB → 472 MB. Heavier than ideal because uptime-kuma bundles every knex DB
+  driver (oracledb ships 5 per-platform prebuilts) + full i18n assets — not trimmed.
+
+### Method notes (so numbers reproduce)
+- `scripts/gen_report.py` reads the grype/syft JSON and queries `docker` live — no hand-typed
+  metrics. CVE counts de-duplicated to distinct (vuln-id × package).
+- **Size reporting under Docker 29 containerd store is inconsistent**: `docker images` (590 MB
+  ours), `docker inspect .Size` (117 MB), `docker history` sum (472 MB) all differ. Resolved by
+  validating that `inspect .Size` == the amd64 **registry manifest's** summed compressed layer
+  blobs (upstream: 180/601 MB matched exactly) → use that as "compressed/pull size"; `docker
+  history` sum as "uncompressed". Stated explicitly in the report.
+- grype DB downloaded fresh this run; scans are amd64 single-arch (§6 step 2 order).
+
+### Still TODO for the pipeline skeleton (not yet done)
+- **cosign keyless signing + the `.github/workflows/forge.yml`** (build→SBOM→scan→sign→report).
+  Keyless signing needs registry + OIDC, so it's wired in CI (GitHub OIDC), not run locally.
+  Paused here per "pause after the first real diff so I can see the actual numbers".
