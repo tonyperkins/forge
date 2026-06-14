@@ -393,6 +393,52 @@ converted file lacks (the LLM must not author those) — reported as documented 
 
 ---
 
+## 2026-06-14 — Session 3: LLM provider → Kilo Gateway (OpenAI-compatible), transport-only
+
+### Why the change
+No Anthropic API key available, and the owner's OAuth/subscription login can't drive programmatic
+calls. Switched the agent's LLM transport to the **Kilo Gateway** — **OpenAI-compatible only**
+(base `https://api.kilo.ai/api/gateway`, bearer = Kilo key); it has **no** native Anthropic
+`/v1/messages`. So `agent/llm.py` now uses the **OpenAI SDK** pointed at Kilo. Models are still
+Claude. **Only the transport changed** — the edit-op contract is unchanged.
+
+### Verified before wiring (run, not assumed — §10)
+- Kilo `/models` → 200, 334 models. Both Claude tiers reachable with exact (dotted, `anthropic/`-
+  prefixed) IDs: **default `anthropic/claude-sonnet-4.6`**, **escalation `anthropic/claude-opus-4.8`**
+  (backs `claude-4.8-opus-20260528`). Sonnet→Opus one-hop design intact.
+- **Strict `json_schema` structured output round-trips through Kilo on both tiers** (real
+  `/chat/completions` test calls) — schema-valid JSON, parses cleanly.
+- In-code smoke test of the reworked `llm.diagnose()` against Kilo: correctly returned class **A**,
+  high confidence, four bounded edit-ops (3× `replace_base_image` + `set_user`), all inside the
+  vocabulary; our defensive validator passed. Transport rework proven end-to-end.
+
+### Contract held (CONTEXT §4, non-negotiable)
+`diagnose()` still returns the same typed edit-ops (`replace_base_image`/`set_user`/`add_package`);
+`adjudicate_wolfi()` still picks from real candidates; the LLM **never** emits Dockerfile text. On
+top of strict `json_schema`, `llm.py` does **defensive parse + schema validation on our side**: a
+non-JSON body or an out-of-vocabulary op is a hard `LLMError`, never accepted as free text (relaxing
+to free text would silently widen the LLM's remit, which §4 forbids).
+
+### Deps + secrets handling
+- `requirements.txt`: dropped `anthropic`, added `openai==2.41.1` + `python-dotenv==1.2.2`.
+- **Agent is LOCAL-ONLY.** `agent/llm.py` is a pure `os.environ` reader: requires `KILO_API_KEY`
+  (fails loudly with a "set KILO_API_KEY (see .env.example)" message — no silent None), reads
+  `KILO_BASE_URL` (canonical default if unset). It never touches `.env`.
+- `.env` is loaded **once, at the `forge_agent` entrypoint only**, best-effort via
+  `load_dotenv(find_dotenv(usecwd=True), override=False)` — absent file → no-op (shell export / CI
+  env still work); a real shell export wins over `.env`.
+- `.env` is gitignored and **not tracked** (verified: `git ls-files` shows only `.env.example`);
+  `.env.example` is secret-free and documents both vars.
+- **CI stays keyless (GitHub OIDC) and gets NO Kilo secret** — the pipeline only builds/signs the
+  committed `Dockerfile.agent`, it never calls the LLM. **A future session must not wire the Kilo
+  key into `.github/workflows/forge.yml`.**
+
+### ⏸ Still paused before the first live `forge_agent` run (owner instruction)
+Transport proven; awaiting owner confirmation the key is in place, then
+`.venv/bin/python -m agent.forge_agent`.
+
+---
+
 ## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
@@ -436,8 +482,12 @@ real grype/syft, regen via `scripts/gen_report.py`):
   (`forge_agent` + `dockerfile`/`build_runner`/`verifier`, LLM seam `llm.py`) done; `--dry-run`
   (dfc convert → `--target release` build → signals, no key) is green and surfaces the 3 phantom
   bases via real registry probe. Sonnet→Opus one-hop escalation with model-attributed provenance.
-  **Next action:** owner sets `ANTHROPIC_API_KEY`, then `.venv/bin/python -m agent.forge_agent`
-  for the first live run (paused here per owner instruction). venv at `.venv` (anthropic 0.109.1).
+  **LLM transport = Kilo Gateway (OpenAI-compatible)**, models `anthropic/claude-sonnet-4.6` +
+  `anthropic/claude-opus-4.8`; creds from `os.environ` (`KILO_API_KEY`/`KILO_BASE_URL`), `.env`
+  loaded only at the entrypoint; CI stays keyless with no Kilo secret (Session 3 entry).
+  **Next action:** owner confirms `KILO_API_KEY` is set (local `.env`), then
+  `.venv/bin/python -m agent.forge_agent` for the first live run (paused here per owner instruction).
+  venv at `.venv` (openai 2.41.1, python-dotenv 1.2.2).
 
 **Read first (in order):**
 1. `CONTEXT.md` — purpose, honesty guardrails (§2), architecture (§4), build order (§6).

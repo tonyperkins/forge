@@ -251,7 +251,22 @@ def dry_run() -> int:
     return 0
 
 
+def _load_env() -> None:
+    """Load `.env` into the process environment, best-effort and at the edge only (secrets stay
+    out of agent.llm, which is a pure os.environ reader). If python-dotenv or .env is absent, we
+    fall through to whatever's already exported (so a shell export or CI works unchanged).
+    override=False means a real shell export wins over .env."""
+    try:
+        from dotenv import find_dotenv, load_dotenv
+        # usecwd=True searches from the working directory (the repo root the agent runs in)
+        # instead of walking the caller's stack frame, which is fragile. No .env → no-op.
+        load_dotenv(find_dotenv(usecwd=True), override=False)
+    except ImportError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_env()
     ap = argparse.ArgumentParser(description="forge agent — harden a dfc-converted Dockerfile (A/B/D).")
     ap.add_argument("--max-iters", type=int, default=MAX_ITERS)
     ap.add_argument("--no-verify", action="store_true", help="skip the verify stage")

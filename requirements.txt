@@ -1,5 +1,7 @@
 # forge agent runtime deps (Python). Install into a venv:
 #   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-# The Claude API is used only for the agent's log-diagnosis + fix-drafting (CONTEXT §4);
-# anthropic pulls its own transitive deps (httpx, pydantic, …).
-anthropic==0.109.1
+# The agent calls Claude through the Kilo Gateway (OpenAI-compatible) — see decisions.md;
+# only the transport is OpenAI, the models are Claude (anthropic/claude-*). python-dotenv is a
+# local convenience for populating the process environment from .env (the code reads os.environ).
+openai==2.41.1
+python-dotenv==1.2.2
