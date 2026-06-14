@@ -1,74 +1,79 @@
+# syntax=docker/dockerfile:1
 # ==========================================================================
-#  PARTIAL — forge AGENT OUTPUT. THIS FILE DOES NOT BUILD AS-IS.
-#  Stopping point: stopped at a documented touch-up boundary.
-#  The agent autonomously applied the class-A/D edits below, then stopped rather
-#  than author build steps the LLM must not write (CONTEXT §4). Human touch-ups
-#  remain — see the companion agent-provenance.md for exactly what each needs.
-#  Do NOT use this as a working Dockerfile; the hand-built reference is
-#  Dockerfile.hardened. This file exists to make the honest stopping point
-#  inspectable, not to be deployed.
+#  uptime-kuma — forge AGENT OUTPUT + human touch-ups. The hand-off is the point.
+#
+#  AUTONOMOUS (agent, class A/D — see agent-provenance.md): flattened the phantom
+#    cgr.dev/chainguard/uptime-kuma:* bases to the real node:latest-dev (build) →
+#    distroless node:latest (runtime) pattern, and set the runtime non-root (65532).
+#    Those edits match Dockerfile.hardened's base choices exactly.
+#
+#  HUMAN TOUCH-UPS (build-authoring outside the agent's A/B/D edit-op scope),
+#  in the serial order the build surfaced them:
+#    1. cgr.dev/chainguard/go:latest-dev healthcheck-compile stage
+#    2. dumb-init (apk in builder + COPY into the distroless runtime)
+#    3. frontend build (full `npm ci` -> `npm run build` -> `npm prune --omit=dev`)
+#    4. pruned upstream's unused multi-target CI stages (rootless / nightly /
+#       nightly-rootless / pr-test2 / upload-artifact) as dead cruft
+#
+#  Why three documented touch-ups became four: the build fails FAST at the first
+#  authoring wall (the healthcheck COPY), so the agent never reached the dumb-init
+#  or frontend-build gaps — each only became visible once the prior wall cleared.
+#  The agent did not "miss" them; it stopped correctly at the first wall, and the
+#  human pass resolved the serial set. The honest boundary (for the README's
+#  limitations section): the agent's output could NOT have gone green via more or
+#  better A/B/D edit-ops — every missing piece (Go compile, dumb-init, frontend
+#  build) is build-AUTHORING the edit-op vocabulary cannot express, and a fail-fast
+#  build hides each until the earlier wall clears. That is where conversion-
+#  automation ends and a human build-author begins.
+#
+#  Bases digest-pinned (CONTEXT §7). Build context = upstream checkout @ 8d36977.
 # ==========================================================================
 
-ARG BASE_IMAGE=cgr.dev/chainguard/uptime-kuma:latest
-FROM cgr.dev/chainguard/node:latest-dev AS build_healthcheck
-FROM cgr.dev/chainguard/node:latest-dev AS build
-USER node
+# ── HUMAN TOUCH-UP #1: compile upstream's Go healthcheck (CGO off -> static). The
+#    agent flattened this stage's phantom base to node:latest-dev but left it empty
+#    (it cannot author a build step); the human supplies the real go:latest-dev
+#    compile, matching upstream's `go build extra/healthcheck.go`.
+FROM cgr.dev/chainguard/go:latest-dev@sha256:550f62080027f77b1ed036b3e7e3e6cfb9d03be30ffdeba42c61f545e418b004 AS build_healthcheck
+WORKDIR /app
+COPY extra/healthcheck.go ./extra/healthcheck.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ./extra/healthcheck ./extra/healthcheck.go
+
+# ── Node build stage (base flattened autonomously by the agent -> node:latest-dev).
+FROM cgr.dev/chainguard/node:latest-dev@sha256:1dfab5e82e7c50500a1cbdd315749ee66d8e9dc3c526593bc9da88747dd4b514 AS build
+# HUMAN TOUCH-UP #2a: install dumb-init in the builder. The build stage runs as root
+# (as Dockerfile.hardened's does) — needed for apk, and so `npm prune` below can rewrite
+# the root-owned lockfile that `COPY . .` lays down. (The build-stage `USER node` here was
+# inherited upstream content, not an agent class-D edit; the agent's only USER edit was the
+# runtime stage. The release COPY re-chowns everything to node, so the runtime stays non-root.)
+USER root
+RUN apk add --no-cache dumb-init
 WORKDIR /app
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
 COPY --chown=node:node .npmrc .npmrc
 COPY --chown=node:node package.json package.json
 COPY --chown=node:node package-lock.json package-lock.json
-RUN npm ci --omit=dev
+# HUMAN TOUCH-UP #3a: full deps (incl. vite) so the frontend can be built — the agent
+# inherited upstream's `npm ci --omit=dev`, which omits vite and leaves no dist/.
+RUN npm ci --no-audit
 COPY . .
 COPY --chown=node:node --from=build_healthcheck /app/extra/healthcheck /app/extra/healthcheck
-RUN mkdir ./data
-FROM cgr.dev/chainguard/node:latest AS release
+# HUMAN TOUCH-UP #3b: build the Vue frontend (dist/ is gitignored upstream), then drop
+# dev deps. Without this the server exits with "Cannot find 'dist/index.html'".
+RUN npm run build \
+ && npm prune --omit=dev \
+ && mkdir -p ./data
+
+# ── Distroless runtime (base flattened autonomously by the agent -> node:latest;
+#    non-root 65532 also set autonomously by the agent, class D).
+FROM cgr.dev/chainguard/node:latest@sha256:27bf957bdf6d189108c8908c958fd966d9814f78e7172c2d791940f4e208a334 AS release
 WORKDIR /app
 LABEL org.opencontainers.image.source="https://github.com/louislam/uptime-kuma"
 ENV UPTIME_KUMA_IS_CONTAINER=1
 COPY --chown=node:node --from=build /app /app
+# HUMAN TOUCH-UP #2b: bring dumb-init into the runtime (referenced by ENTRYPOINT).
+COPY --from=build /usr/bin/dumb-init /usr/bin/dumb-init
 EXPOSE 3001
 HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 CMD extra/healthcheck
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["node", "server/server.js"]
 USER 65532:65532
-FROM release AS rootless
-USER node
-FROM release AS nightly
-RUN npm run mark-as-nightly
-FROM nightly AS nightly-rootless
-USER node
-FROM cgr.dev/chainguard/uptime-kuma:latest-dev AS pr-test2
-USER root
-WORKDIR /app
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
-RUN apk add --no-cache curl git && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-RUN rm -rf ./* && chown node /app
-USER node
-RUN git config --global user.email "no-reply@no-reply.com"
-RUN git config --global user.name "PR Tester"
-RUN git clone https://github.com/louislam/uptime-kuma.git .
-RUN git config --global advice.detachedHead false
-RUN npm ci
-EXPOSE 3000 3001
-HEALTHCHECK --interval=60s --timeout=30s --start-period=180s --retries=5 CMD extra/healthcheck
-CMD ["npm", "run", "start-pr-test"]
-FROM cgr.dev/chainguard/uptime-kuma:latest-dev AS upload-artifact
-USER root
-WORKDIR /
-RUN apk add --no-cache curl file
-COPY --from=build /app /app
-ARG VERSION
-ARG GITHUB_TOKEN
-ARG TARGETARCH
-ARG PLATFORM=debian
-ARG FILE=$PLATFORM-$TARGETARCH-$VERSION.tar.gz
-ARG DIST=dist.tar.gz
-RUN chmod +x /app/extra/upload-github-release-asset.sh
-RUN cd /app && tar -zcvf $DIST dist
-RUN /app/extra/upload-github-release-asset.sh github_api_token=$GITHUB_TOKEN owner=louislam repo=uptime-kuma tag=$VERSION filename=/app/$DIST
-
-

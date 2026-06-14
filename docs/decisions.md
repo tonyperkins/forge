@@ -480,6 +480,50 @@ the agent's autonomous output.
 
 ---
 
+## 2026-06-14 — Session 3 (cont.): human touch-up pass → green + verified (converges to hardened)
+
+Separate, clearly-attributed pass applied to the agent's partial `Dockerfile.agent` (NOT a copy of
+`Dockerfile.hardened` — the hand-off is the point). Committed as its own commit after the agent-only
+output (`6771418`).
+
+### The build-authoring touch-ups (outside the agent's A/B/D edit-op scope)
+1. **Go healthcheck-compile stage** — `cgr.dev/chainguard/go:latest-dev`, `go build extra/healthcheck.go`.
+2. **dumb-init** — `apk add` in the builder + `COPY` into the distroless runtime.
+3. **Frontend build** — full `npm ci` → `npm run build` → `npm prune --omit=dev` (the agent inherited
+   upstream's `npm ci --omit=dev`, which omits vite and ships no `dist/` → server exits with
+   "Cannot find 'dist/index.html'"). Also ran the **build stage as root** (as hardened does) so
+   `npm prune` can rewrite the root-owned lockfile `COPY . .` lays down.
+4. **Pruned** upstream's unused multi-target CI stages (rootless/nightly/nightly-rootless/pr-test2/
+   upload-artifact) as dead cruft — NOT an agent error (it correctly scoped to the `release` closure).
+
+### Why three documented touch-ups became four (the honest serial-walls finding)
+The agent didn't "miss" #2–#4. The build **fails fast at the first authoring wall** (the healthcheck
+COPY), so the agent never reached the dumb-init or frontend-build gaps — each only became visible once
+the prior wall was cleared (boundary #1 → build green but exits on missing `dist/` → boundary #3 →
+green+serving). The agent stopped correctly at the first wall; the human pass cleared the serial set.
+
+### The "where conversion-automation ends" insight (for the README limitations section)
+The agent's output **could not** have gone green via more or better A/B/D edit-ops. Every missing
+piece — Go compile, dumb-init, frontend build — is build-**authoring** the edit-op vocabulary cannot
+express (no "add a compile stage" / "add a build step" op, by design — that's the §4 boundary that
+keeps the LLM from writing Dockerfiles). A fail-fast build also **hides** these serial walls until the
+earlier one clears, so they can't be enumerated up front. That boundary — name-swaps and base
+flattening (automatable, A/B/D) vs. authoring new build logic (not automatable) — is exactly where
+conversion-automation ends and a human build-author begins. dfc's own framing ("automation handles
+90%, AI manages edge cases") lands here: the agent did the structural 90%, the human authored the 10%.
+
+### Verified (same gate as Dockerfile.hardened) — converges to the hand-built reference
+`forge/uptime-kuma:agent-touchedup`: **non-root 65532:65532**, healthcheck **`Res Code: 200`**,
+**OS/runtime-layer 0 Critical / 0 High**, npm-layer 28 (out of scope). Same base choices as
+`Dockerfile.hardened` (the agent picked these autonomously) + the human-authored build logic →
+functionally the same image. Convergence confirms the agent's autonomous A/D portion was correct.
+
+### Next (owner checkpoint): pipeline + README
+Paused after green verify. Still to discuss: wiring `Dockerfile.agent` into the existing pipeline,
+and the README (CVE diff lead + this agent hand-off / limitations story).
+
+---
+
 ## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
