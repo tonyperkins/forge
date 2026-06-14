@@ -59,8 +59,30 @@ class Escalation:
     reason: str
 
 
+@dataclass
+class Reversion:
+    """A fix that proposed swapping a base back to a known-phantom image — the loop's wobble.
+    Recorded honestly (CONTEXT §2): the guardrails earning their keep is truthful detail, not
+    something to smooth over. `corrected_iteration` is the later fix that undid it, if any."""
+    iteration: int
+    stage: str
+    image: str
+    model: str
+    corrected_iteration: int | None = None
+
+
+@dataclass
+class TouchUpAttempt:
+    """A diagnosis that returned out-of-scope / no edits — the agent saying 'a human must do
+    this' rather than authoring a build step. These define the touch-up boundary."""
+    iteration: int
+    model: str
+    rationale: str
+
+
 class AgentStop(RuntimeError):
-    """Loud, intentional stop — carries the diagnostic dump (cap reached / touch-up boundary)."""
+    """Loud, intentional stop for setup errors (missing input/context) — not the touch-up
+    boundary, which now emits artifacts rather than just raising."""
 
 
 def _apply(df: Dockerfile, edits) -> None:
@@ -112,7 +134,12 @@ def run(max_iters: int = MAX_ITERS, do_verify: bool = True) -> int:
 
     fixes: list[FixRecord] = []
     escalations: list[Escalation] = []
-    tried: dict[str, set[str]] = {}  # failure signature -> models already diagnosed for it
+    reversions: list[Reversion] = []
+    touch_ups: list[TouchUpAttempt] = []
+    known_phantom: set[str] = set()   # images proven nonexistent by the registry probe
+    tried: dict[str, set[str]] = {}   # failure signature -> models already diagnosed for it
+    status = "cap_reached"
+    result = None
 
     # 2. Bounded loop.
     for i in range(1, max_iters + 1):
@@ -120,11 +147,14 @@ def run(max_iters: int = MAX_ITERS, do_verify: bool = True) -> int:
         result = build_runner.build(df.text, CONTEXT_DIR, TAG, target=TARGET_STAGE)
         if result.ok:
             print(f"[forge] build OK on iteration {i}")
+            status = "success"
             break
 
         sig = result.signature()
         print(f"[forge]   build failed (signature: {sig})")
         signals = build_runner.gather_signals(df, result, TARGET_STAGE)
+        for pb in signals.get("phantom_bases", []):
+            known_phantom.add(pb["image"])
         used = tried.setdefault(sig, set())
 
         diag = None
@@ -142,79 +172,153 @@ def run(max_iters: int = MAX_ITERS, do_verify: bool = True) -> int:
             if d.failure_class in llm.ALLOWED_CLASSES and d.edits:
                 diag = d
                 break
+            touch_ups.append(TouchUpAttempt(iteration=i, model=model, rationale=d.rationale))
 
         if diag is None:
-            raise AgentStop(_dump(
-                "no in-scope fix available — documented touch-up boundary",
-                df, result, signals, fixes, escalations))
+            status = "touch_up_boundary"
+            break
 
+        # Record any reversion (swapping a base back to a known-phantom image) before applying,
+        # and mark the prior reversion on the same stage as corrected by this fix.
+        for e in diag.edits:
+            if e.op == "replace_base_image" and e.value.split("@")[0] in known_phantom:
+                reversions.append(Reversion(iteration=i, stage=e.stage, image=e.value, model=diag.model))
+                print(f"[forge]   ⚠ reversion: {diag.model} set {e.stage} back to phantom {e.value}")
+            elif e.op == "replace_base_image":
+                for r in reversions:
+                    if r.stage == e.stage and r.corrected_iteration is None and r.iteration < i:
+                        r.corrected_iteration = i
         _apply(df, diag.edits)
         fixes.append(FixRecord(
             iteration=i, failure_signature=sig, failure_class=diag.failure_class,
             model=diag.model, confidence=diag.confidence, rationale=diag.rationale,
             edits=[{"op": e.op, "stage": e.stage, "value": e.value, "reason": e.reason}
                    for e in diag.edits]))
-    else:
-        raise AgentStop(_dump(
-            f"iteration cap ({max_iters}) reached without a green build",
-            df, result, build_runner.gather_signals(df, result, TARGET_STAGE), fixes, escalations))
 
-    # 3. Finalize: pin digests, write the generated Dockerfile.
-    pin_notes = _pin_digests(df)
-    OUT_AGENT.write_text(df.text)
-    print(f"[forge] wrote {OUT_AGENT}")
-
-    # 4. Verify (non-root + healthcheck + OS-layer scan gate).
+    # 3. Terminal handling — every outcome emits inspectable, committed artifacts (the honest
+    #    stopping point IS the product, CONTEXT §2/§4), not just a stderr dump.
     vres = None
-    if do_verify:
-        print("[forge] verifying (non-root + healthcheck + scan gate) …")
-        vres = verifier.verify(TAG)
-        print(f"[forge]   non-root={vres.non_root} healthcheck={vres.healthcheck_ok} "
-              f"OS-crit={vres.os_critical} -> {'PASS' if vres.passed else 'FAIL'}")
+    pin_notes: list[str] = []
+    if status == "success":
+        pin_notes = _pin_digests(df)
+        OUT_AGENT.write_text(df.text)
+        print(f"[forge] wrote {OUT_AGENT} (green build)")
+        if do_verify:
+            print("[forge] verifying (non-root + healthcheck + scan gate) …")
+            vres = verifier.verify(TAG)
+            print(f"[forge]   non-root={vres.non_root} healthcheck={vres.healthcheck_ok} "
+                  f"OS-crit={vres.os_critical} -> {'PASS' if vres.passed else 'FAIL'}")
+    else:
+        # Partial output: real agent edits so far, with a header making clear it does NOT build.
+        OUT_AGENT.write_text(_partial_header(status) + df.text)
+        print(f"[forge] wrote {OUT_AGENT} (PARTIAL — does not build as-is)", file=sys.stderr)
 
-    # 5. Fix-provenance report (autonomous fixes, model attribution, touch-ups).
-    OUT_PROVENANCE.write_text(_provenance_md(fixes, escalations, vres, pin_notes))
+    OUT_PROVENANCE.write_text(_provenance_md(status, fixes, escalations, reversions, touch_ups,
+                                             vres, pin_notes, result))
     print(f"[forge] wrote {OUT_PROVENANCE}")
-    print(f"[forge] hand off {OUT_AGENT} to the existing pipeline (.github/workflows/forge.yml).")
-    return 0 if (vres is None or vres.passed) else 1
+    if status == "success":
+        print(f"[forge] hand off {OUT_AGENT} to the existing pipeline (.github/workflows/forge.yml).")
+        return 0 if (vres is None or vres.passed) else 1
+    print(f"[forge] STOP: {status} — {len(fixes)} autonomous fix(es), touch-ups required. "
+          f"See {OUT_PROVENANCE}.", file=sys.stderr)
+    return 2
 
 
-def _dump(reason: str, df, result, signals, fixes, escalations) -> str:
-    return (f"AGENT STOP: {reason}\n\n"
-            f"== failure signature ==\n{result.signature()}\n\n"
-            f"== deterministic signals ==\n{json.dumps(signals, indent=2)}\n\n"
-            f"== autonomous fixes so far ({len(fixes)}) ==\n"
-            + "\n".join(f"  iter {f.iteration} [{f.failure_class}/{f.model}]: {f.rationale}"
-                        for f in fixes)
-            + (f"\n\n== escalations ==\n" + "\n".join(f"  {e.from_model}→{e.to_model}: {e.reason}"
-                                                       for e in escalations) if escalations else "")
-            + f"\n\n== build error tail ==\n{result.error_tail}\n\n"
-            f"== current Dockerfile ==\n{df.text}")
+_STATUS_LABEL = {
+    "success": "green build",
+    "touch_up_boundary": "stopped at a documented touch-up boundary",
+    "cap_reached": "iteration cap reached without a green build",
+}
 
 
-def _provenance_md(fixes, escalations, vres, pin_notes) -> str:
-    auto = len(fixes)
+def _partial_header(status: str) -> str:
+    return (
+        "# ==========================================================================\n"
+        "#  PARTIAL — forge AGENT OUTPUT. THIS FILE DOES NOT BUILD AS-IS.\n"
+        f"#  Stopping point: {_STATUS_LABEL.get(status, status)}.\n"
+        "#  The agent autonomously applied the class-A/D edits below, then stopped rather\n"
+        "#  than author build steps the LLM must not write (CONTEXT §4). Human touch-ups\n"
+        "#  remain — see the companion agent-provenance.md for exactly what each needs.\n"
+        "#  Do NOT use this as a working Dockerfile; the hand-built reference is\n"
+        "#  Dockerfile.hardened. This file exists to make the honest stopping point\n"
+        "#  inspectable, not to be deployed.\n"
+        "# ==========================================================================\n\n"
+    )
+
+
+def _provenance_md(status, fixes, escalations, reversions, touch_ups, vres, pin_notes, result) -> str:
     sonnet = sum(1 for f in fixes if f.model == llm.MODEL)
     opus = sum(1 for f in fixes if f.model == llm.ESCALATION_MODEL)
     L = ["# Agent fix provenance — uptime-kuma\n",
-         "> Generated by `agent/forge_agent.py`. Tracks which fixes the agent made autonomously "
-         "and which model produced each (CONTEXT §4 honesty boundary). The agent output is "
+         "> Generated by `agent/forge_agent.py`. The honest record of what the agent did "
+         "autonomously vs. what it left for a human (CONTEXT §4 boundary). The agent output is "
          "`Dockerfile.agent`, separate from the hand-built `Dockerfile.hardened`.\n",
-         f"**{auto} autonomous fix(es)** — {sonnet} by `{llm.MODEL}`, "
-         f"{opus} by `{llm.ESCALATION_MODEL}` (escalated).\n"]
+         f"**Outcome:** {_STATUS_LABEL.get(status, status)}.",
+         f"**{len(fixes)} autonomous fix(es)** — {sonnet} by `{llm.MODEL}`, "
+         f"{opus} by `{llm.ESCALATION_MODEL}` (escalated)."]
+    if status != "success":
+        L.append("**`Dockerfile.agent` is PARTIAL and does not build as-is** — see its header "
+                 "and the touch-ups below.")
+    L.append("")
+
     if escalations:
         L.append("## Model escalations (cost-tiering, made visible)\n")
+        L.append("Sonnet runs by default; Opus is the one-hop escalation when a Sonnet fix fails "
+                 "to move the build. Each escalation is recorded so the tiering is a demonstrated "
+                 "decision, not a hidden detail.\n")
         for e in escalations:
             L.append(f"- `{e.from_model}` → `{e.to_model}` — {e.reason}")
         L.append("")
+
     L.append("## Autonomous fixes (in order)\n")
     L.append("| # | Class | Model | Confidence | Edit(s) | Rationale |")
     L.append("|--:|---|---|---|---|---|")
     for f in fixes:
-        edits = "; ".join(f"{e['op']} {e['stage']}→`{e['value']}`" for e in f.edits)
+        edits = "; ".join(f"{e['op']} `{e['stage']}`→`{e['value']}`" for e in f.edits)
         L.append(f"| {f.iteration} | {f.failure_class} | `{f.model}` | {f.confidence} | "
                  f"{edits} | {f.rationale} |")
     L.append("")
+
+    if reversions:
+        L.append("## Loop wobble — where the guardrails earned their keep\n")
+        L.append("The agent isn't perfect: it sometimes proposed reverting a base back to a "
+                 "phantom image. Recorded honestly rather than smoothed over — the bounded loop "
+                 "and Sonnet→Opus escalation caught and corrected each one.\n")
+        for r in reversions:
+            corr = (f"corrected by iter {r.corrected_iteration}"
+                    if r.corrected_iteration else "**not corrected before the loop stopped**")
+            L.append(f"- iter {r.iteration} (`{r.model}`): set `{r.stage}` back to phantom "
+                     f"`{r.image}` — {corr}.")
+        L.append("")
+
+    # Touch-ups: what the agent deliberately did NOT do (described, never performed).
+    L.append("## Touch-ups required (described, NOT performed)\n")
+    if status == "success":
+        L.append("None — the build went green autonomously.\n")
+    else:
+        L.append(f"The build stopped at: `{(result.signature() if result else 'n/a')}`. The agent "
+                 "does not author build steps (a compile-and-COPY stage is outside the edit-op "
+                 "vocabulary and outside A/B/D), so the remaining work is a separate, "
+                 "clearly-attributed human step.\n")
+        if touch_ups:
+            L.append("**Encountered — the agent stopped here.** Both models declined to author a "
+                     "fix (returned out-of-scope), in their own words:\n")
+            for t in touch_ups:
+                L.append(f"- `{t.model}` (iter {t.iteration}): {t.rationale}")
+            L.append("")
+        L.append("**1. Go-compiled healthcheck stage (encountered).** `build_healthcheck` was "
+                 "flattened onto a Chainguard node image, which does not carry upstream's "
+                 "healthcheck binary, so `COPY --from=build_healthcheck /app/extra/healthcheck` "
+                 "fails. *Needs:* a `cgr.dev/chainguard/go:latest-dev` stage that runs "
+                 "`go build` on `extra/healthcheck.go` (CGO off → static), with the COPY pointed "
+                 "at it. This is exactly what `Dockerfile.hardened` does by hand.\n")
+        L.append("**2. dumb-init (anticipated downstream — NOT reached by the agent).** The "
+                 "runtime `ENTRYPOINT [\"/usr/bin/dumb-init\"]` needs dumb-init, which distroless "
+                 "node doesn't ship. *Needs:* `apk add dumb-init` in a builder + `COPY` the binary "
+                 "into the runtime stage. Known from `Dockerfile.hardened`; the build fails at the "
+                 "healthcheck COPY first, so the agent never reached this — recorded for "
+                 "completeness, not derived by the agent.\n")
+
     if vres is not None:
         L.append("## Verification\n")
         L.append(f"- non-root: **{vres.non_root}** (user `{vres.user}`)")

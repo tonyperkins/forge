@@ -439,6 +439,47 @@ Transport proven; awaiting owner confirmation the key is in place, then
 
 ---
 
+## 2026-06-14 — Session 3 (cont.): first live agent run + two loop-honesty fixes
+
+### Two fixes (owner-approved) before the run
+- **Emit-on-stop (was a real design gap, not polish):** the honest stopping point is the product,
+  so every terminal state — success / touch-up boundary / cap — now writes committed artifacts
+  (`Dockerfile.agent` + `agent-provenance.md`), not just a stderr dump. The partial `Dockerfile.agent`
+  carries a header making clear it does NOT build and points to the provenance.
+- **Signature normalization:** `BuildResult.signature()` strips the volatile buildkit step number
+  (`#N`) and ref ids, so the *same underlying error* reads as one signature. Fixes the spurious
+  escalation-ladder reset that caused the iter-2/3 oscillation in the (pre-fix) first run.
+
+### First live run (Kilo, sonnet default / opus escalation) — stopped cleanly at the touch-up boundary
+- **iter 1, Sonnet, class A, 4 edits (1 diagnosis):** replaced all 3 phantom bases —
+  `build_healthcheck`+`build` → `cgr.dev/chainguard/node:latest-dev`, `release` →
+  `cgr.dev/chainguard/node:latest` — and `set_user release 65532:65532` (class D). Matches
+  `Dockerfile.hardened`'s base choices. **Opus made 0 edits.**
+- **iter 2:** `COPY --from=build_healthcheck /app/extra/healthcheck` fails (empty builder). Sonnet →
+  `unknown`/0 edits → **one-hop escalate to Opus → also `unknown`/0 edits → stop**. Contract held:
+  neither model tried to author the missing Go-compile step (outside the edit-op vocab and A/B/D).
+- **Touch-ups recorded (described, NOT performed):** (1) Go-compiled healthcheck stage —
+  *encountered*, in both models' own words; (2) dumb-init — *anticipated downstream, NOT reached*
+  (build dies at the healthcheck COPY first), attributed as reference-knowledge.
+- **No reversion this run.** The pre-fix run had Sonnet oscillate (reverting `build_healthcheck` to
+  the phantom image); with the signature fix + Sonnet nondeterminism it went straight to the
+  boundary. Recorded honestly as *absent*, not smoothed over; the reversion-detection code remains
+  and will log it (with "corrected by iter Y") if it recurs.
+
+### Honest caveats on the committed artifact
+- `Dockerfile.agent` is **PARTIAL** (does not build). It still carries upstream's unrelated
+  multi-target stages (`rootless`/`nightly`/`pr-test2`/`upload-artifact`, some still phantom),
+  untouched because they're outside the `release` target's dependency closure — pruning is part of
+  the human touch-up.
+- "1 autonomous fix" in the provenance = one Sonnet diagnosis applying 4 edits.
+
+### Next (owner-directed): human touch-ups as a SEPARATE, clearly-attributed step
+The agent-only artifact is committed first. The Go-compile healthcheck stage + dumb-init are the
+documented touch-ups; do them as a distinct commit attributed to the human pass, never folded into
+the agent's autonomous output.
+
+---
+
 ## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.

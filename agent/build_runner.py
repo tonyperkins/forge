@@ -37,16 +37,22 @@ class BuildResult:
 
     def signature(self) -> str:
         """A normalized fingerprint of *why* this build failed — used by the loop to tell
-        whether a fix moved the build (new signature = progress) or not (same = escalate)."""
+        whether a fix moved the build (new signature = progress) or not (same = escalate).
+        Volatile bits are stripped so the *same underlying error* reads as one signature
+        regardless of which buildkit step (#N) or ref id it surfaced at — otherwise the
+        escalation ladder resets spuriously when the Dockerfile's step ordering shifts."""
         if self.ok:
             return "ok"
-        # First apk miss, else first error line, normalized of volatile bits (hashes, ids).
         miss = _APK_MISS_RE.search(self.log)
         if miss:
             return f"apk-miss:{miss.group('pkg')}"
         m = _ERROR_LINE_RE.search("\n".join(self.log.splitlines()[-40:]))
         if m:
-            line = re.sub(r"\b[0-9a-f]{12,}\b", "<hash>", m.group(0).strip())
+            line = m.group(0).strip()
+            line = re.sub(r"#\d+\s*", "", line)                 # buildkit step numbers (#2, #12)
+            line = re.sub(r"\bref\s+\S+", "ref <ref>", line)    # volatile buildkit ref ids
+            line = re.sub(r"\b[0-9a-f]{12,}\b", "<hash>", line)  # digests / hashes
+            line = re.sub(r"\s+", " ", line).strip()
             return f"err:{line[:160]}"
         return f"exit:{self.exit_code}"
 
