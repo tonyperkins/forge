@@ -430,7 +430,7 @@ to free text would silently widen the LLM's remit, which §4 forbids).
 - `.env` is gitignored and **not tracked** (verified: `git ls-files` shows only `.env.example`);
   `.env.example` is secret-free and documents both vars.
 - **CI stays keyless (GitHub OIDC) and gets NO Kilo secret** — the pipeline only builds/signs the
-  committed `Dockerfile.agent`, it never calls the LLM. **A future session must not wire the Kilo
+  committed `Dockerfile.hardened`, it never calls the LLM. **A future session must not wire the Kilo
   key into `.github/workflows/forge.yml`.**
 
 ### ⏸ Still paused before the first live `forge_agent` run (owner instruction)
@@ -524,12 +524,32 @@ and the README (CVE diff lead + this agent hand-off / limitations story).
 
 ---
 
-## 🧭 STATE OF PLAY — resumption anchor (2026-06-13, before agent session)
+## 2026-06-14 — Session 3 (cont.): pipeline artifact decision (owner)
+
+**`Dockerfile.hardened` stays the shipped / signed pipeline artifact.** `Dockerfile.agent` + its
+`agent-provenance.md` + the two-commit hand-off (`6771418` agent → `83b3bf1` human pass) are
+presented as the **agent demonstration**, NOT wired into CI as a second signed image.
+- *Reasoning:* the agent output **converges** to hardened but isn't byte-identical; signing the
+  hand-built reference keeps the supply-chain artifact clean, while the agent work stands alongside
+  as the "automation does 90%, human authors 10%" demo.
+- *Future option (noted, NOT built):* a parallel, independently-verifiable **signed agent image** is
+  a separate future decision — do not build it without an explicit owner call. CI stays keyless and
+  Kilo-free regardless (the pipeline builds `Dockerfile.hardened`; it never calls the LLM).
+
+---
+
+## 🧭 STATE OF PLAY — resumption anchor (2026-06-14 — agent complete & verified; README next)
 
 Read this block first; it's the cold-start anchor. Detail lives in the dated entries above.
 
-**Status:** §6 step 1 (manual hardened non-root build) and step 2 (CI pipeline:
-build→SBOM→scan→cosign keyless sign→attest→verify→report) are both **green and banked**.
+**Status:** §6 steps 1–3 **green and banked.** Step 1 (hardened non-root build) + step 2 (CI:
+build→SBOM→scan→cosign keyless sign→attest→verify→report) shipped; **step 3 (the agent) is COMPLETE
+& verified.** The agent autonomously did the class-A/D structural flatten (phantom
+`cgr.dev/chainguard/uptime-kuma:*` → real `node:latest-dev` builders → distroless `node` runtime,
+non-root 65532) matching `Dockerfile.hardened`'s base choices; a separate human pass authored the
+build-only touch-ups (Go healthcheck compile, dumb-init, frontend build, prune dead stages); the
+result builds green and passes the same verify gate as hardened (non-root · healthcheck 200 ·
+OS-layer 0 Crit/0 High). Class B (Wolfi apt→apk mappings) done separately and round-trip-verified.
 
 **Signed artifact:** `ghcr.io/tonyperkins/uptime-kuma:latest`
 @ `sha256:99af11714682058f169b7b83d957836caaa6c956ea1d74291e5c190591badfe2`
@@ -557,28 +577,34 @@ real grype/syft, regen via `scripts/gen_report.py`):
   `@louislam/sqlite3` prebuilt N-API, no compile). Do not build for it. Do not switch targets
   to manufacture it (§2).
 
-**Next:** §6 step 3 — the agent. Scope locked to A/B/D. Plan signed off (see Session 2 entry).
-- **Class B — DONE & verified.** `agent/wolfi_resolver.py` (+ `agent/dfc_runner.py`) resolves the
-  upstream apt surface against the live Wolfi index → `targets/uptime-kuma/mappings.yaml` (dfc
-  format). Round-trip proven: `dfc --mappings=… --warn-missing-packages` reports **0** unmapped;
-  buckets **5 mapped / 8 already-correct / 3 no-equivalent**. Deterministic; LLM seam present but
-  unused for this target (residuals correctly land no-equivalent).
-- **Class A + D — BUILT, deterministic half validated, ⏸ paused for the live run.** Loop
-  (`forge_agent` + `dockerfile`/`build_runner`/`verifier`, LLM seam `llm.py`) done; `--dry-run`
-  (dfc convert → `--target release` build → signals, no key) is green and surfaces the 3 phantom
-  bases via real registry probe. Sonnet→Opus one-hop escalation with model-attributed provenance.
-  **LLM transport = Kilo Gateway (OpenAI-compatible)**, models `anthropic/claude-sonnet-4.6` +
-  `anthropic/claude-opus-4.8`; creds from `os.environ` (`KILO_API_KEY`/`KILO_BASE_URL`), `.env`
-  loaded only at the entrypoint; CI stays keyless with no Kilo secret (Session 3 entry).
-  **Next action:** owner confirms `KILO_API_KEY` is set (local `.env`), then
-  `.venv/bin/python -m agent.forge_agent` for the first live run (paused here per owner instruction).
-  venv at `.venv` (openai 2.41.1, python-dotenv 1.2.2).
+**Agent components (all committed):** `agent/forge_agent.py` (loop), `dfc_runner`, `wolfi_resolver`
+(class B → `targets/uptime-kuma/mappings.yaml`), `dockerfile`, `build_runner`, `verifier`, and the
+single LLM seam `llm.py` (Kilo Gateway / OpenAI-compatible; `anthropic/claude-sonnet-4.6` default,
+`anthropic/claude-opus-4.8` one-hop escalation; creds from `os.environ`, `.env` loaded only at the
+entrypoint). venv at `.venv` (openai 2.41.1, python-dotenv 1.2.2). Re-run: `.venv/bin/python -m
+agent.forge_agent` (needs `KILO_API_KEY`).
 
-**Read first (in order):**
-1. `CONTEXT.md` — purpose, honesty guardrails (§2), architecture (§4), build order (§6).
-2. `docs/decisions.md` — this log (start at this anchor, then skim dated entries).
-3. `targets/uptime-kuma/Dockerfile.hardened` — the hand-walked path the agent automates.
-4. `targets/uptime-kuma/Dockerfile.converted` + `.converted-base` — raw dfc output showing
-   the A/B/D failures the agent must fix (phantom images, unmapped apk names, USER root).
-   Supporting: `Dockerfile.upstream` / `.upstream-base` (inputs), `scripts/gen_report.py` +
-   `cve_summary.py` (deterministic report), `.github/workflows/forge.yml` (pipeline).
+**Next: the README (only remaining immediate work).** Lead with the CVE diff — **OS/runtime-layer
+507 → 0** (headline), total 539 → 28 as supporting context, npm layer 32 → 28 explicitly out of
+scope (Chainguard Libraries' domain, no credit claimed), size 180 → 117 MB reported straight. Then
+tell the **agent hand-off story**: dfc converts → agent autonomously flattens the phantom bases +
+restores non-root (A/D) → stops honestly at the first build-authoring wall → human authors the 10%
+→ converges to hardened. Use the "where conversion-automation ends" framing (2026-06-14 human-pass
+entry) for the honest limitations section. Pipeline framing per the decision above (hardened is the
+signed artifact; agent is the demonstration). Honor §2 honesty + §8 README must / must-nots.
+
+(§6 step 4 — Tier 2 melange/apko — remains the optional, hard-timeboxed stretch per CONTEXT §6; not
+started, not required for a complete, presentable artifact.)
+
+**Read first (in order) for the README session:**
+1. `CONTEXT.md` — §2 honesty guardrails, §8 README must-haves/must-nots, §1 purpose, §9 delivery.
+2. `docs/decisions.md` — this anchor, then the three 2026-06-14 Session-3 entries (agent run, human
+   pass, pipeline decision) + the locked-numbers block above.
+3. `docs/cve-report.md` — canonical CVE/size diff numbers (source for the README table).
+4. `targets/uptime-kuma/agent-provenance.md` — the agent's autonomous fixes + the touch-up boundary
+   in the models' own words (the hand-off story).
+5. `targets/uptime-kuma/Dockerfile.agent` — header narrates the agent/human split + "where
+   automation ends"; `Dockerfile.hardened` is the shipped reference; `.converted` / `.upstream`
+   show the dfc delta the agent fixes.
+6. `.github/workflows/forge.yml` + `scripts/gen_report.py` / `cve_summary.py` — the signed pipeline
+   and the deterministic report generators.
