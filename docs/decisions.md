@@ -163,7 +163,7 @@ clone the same way.
   flattening, (B) apt→apk package-name misses, (D) USER-root → restore non-root. Native-toolchain
   becomes documented "anticipated, did not occur" — honest README material, not a feature to fake.
 
-### Other honest notes
+### Other notes
 - `cgr.dev/chainguard/node:latest` is **not fully shell-less**: it bundles busybox
   (`/bin/sh → /bin/busybox`). Describe as minimal/distroless-style + non-root, not "shell-less".
 - Image size **590 MB** (amd64). Heavier than ideal: uptime-kuma bundles every knex DB driver
@@ -196,7 +196,7 @@ Chromium+MariaDB+fonts we deliberately exclude). Both sides are app version 2.4.
 
 ### Real numbers (grype/syft JSON under .scan/, regen via `scripts/gen_report.py`)
 - **Total CVEs: 539 → 28 (95% fewer) vs slim-rootless.** Critical 33 → 1, High 135 → 17.
-- **Honest decomposition (the real story):**
+- **Layer decomposition:**
   - **OS/runtime-layer CVEs: 507 → 0** — image hardening eliminated that entire layer (incl.
     32 Critical, 117 High). This is the layer the project actually targets.
   - **npm/application-layer CVEs: 32 → 28 — essentially unchanged, and that's correct.** Base
@@ -466,7 +466,7 @@ Transport proven; awaiting owner confirmation the key is in place, then
   boundary. Recorded honestly as *absent*, not smoothed over; the reversion-detection code remains
   and will log it (with "corrected by iter Y") if it recurs.
 
-### Honest caveats on the committed artifact
+### Caveats on the committed artifact
 - `Dockerfile.agent` is **PARTIAL** (does not build). It still carries upstream's unrelated
   multi-target stages (`rootless`/`nightly`/`pr-test2`/`upload-artifact`, some still phantom),
   untouched because they're outside the `release` target's dependency closure — pruning is part of
@@ -496,7 +496,7 @@ output (`6771418`).
 4. **Pruned** upstream's unused multi-target CI stages (rootless/nightly/nightly-rootless/pr-test2/
    upload-artifact) as dead cruft — NOT an agent error (it correctly scoped to the `release` closure).
 
-### Why three documented touch-ups became four (the honest serial-walls finding)
+### Why three documented touch-ups became four (serial walls)
 The agent didn't "miss" #2–#4. The build **fails fast at the first authoring wall** (the healthcheck
 COPY), so the agent never reached the dumb-init or frontend-build gaps — each only became visible once
 the prior wall was cleared (boundary #1 → build green but exits on missing `dist/` → boundary #3 →
