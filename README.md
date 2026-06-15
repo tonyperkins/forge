@@ -1,12 +1,18 @@
 # forge
 
-**An agentic pipeline that converts and hardens an upstream container image with
-no existing Chainguard equivalent, using Chainguard's own tooling, and ships a
-signed, SBOM'd image with a measured CVE diff.**
+**A pipeline that hardens an upstream container image with no existing Chainguard
+equivalent: an LLM agent automates the structural conversion of Chainguard's `dfc`
+output (phantom-base flattening, non-root), a human authors the build steps the
+agent cannot, and CI ships the hand-built reference as a signed, SBOM'd image with a
+measured CVE diff.**
 
 Target: [`uptime-kuma`](https://github.com/louislam/uptime-kuma) (Node.js, MIT,
 60k+ stars), chosen because it is **not** in Chainguard's catalog, so `dfc` has no
 image to map it to. That gap is the problem this project addresses.
+
+The signed, shipped image is the hand-built reference (`Dockerfile.hardened`); the
+agent's output is committed separately (`Dockerfile.agent`) as an auditable partial
+conversion that shows where the bounded edit-op loop stops.
 
 ---
 
@@ -64,6 +70,33 @@ here, so it is shown for context only. Same app version on both sides — uptime
 OS packages **150 → 27 (82% fewer)**. Compressed size **180 → 117 MB (35%
 smaller)** — modest, because this target bundles every knex DB driver and full i18n
 assets.
+
+### Reproduce these numbers
+
+Every figure above traces to a JSON under `.scan/` or a live `docker` query —
+nothing is hand-typed. [`docs/cve-report.md`](docs/cve-report.md) records the scanned
+image digests and the exact tool versions; the same scans rerun with:
+
+```bash
+# pinned tools, matching docs/cve-report.md: syft v1.45.1, grype v0.114.0
+mkdir -p .scan
+
+# upstream checkout pinned at commit 8d36977 (skip if you already have it)
+git clone https://github.com/louislam/uptime-kuma build/uptime-kuma
+git -C build/uptime-kuma checkout 8d36977569730b430c269c73c2e4d528e02ecc56
+
+docker build -f targets/uptime-kuma/Dockerfile.hardened \
+  -t forge/uptime-kuma:hardened build/uptime-kuma
+docker pull louislam/uptime-kuma:2.4.0-slim-rootless
+docker pull louislam/uptime-kuma:2.4.0
+
+scan() { syft "$1" -o json=".scan/sbom_$2.json"; grype "$1" -o json=".scan/grype_$2.json"; }
+scan forge/uptime-kuma:hardened               forge_uptime-kuma_hardened
+scan louislam/uptime-kuma:2.4.0-slim-rootless louislam_uptime-kuma_2.4.0-slim-rootless
+scan louislam/uptime-kuma:2.4.0               louislam_uptime-kuma_2.4.0
+
+python3 scripts/gen_report.py   # regenerates docs/cve-report.md from the .scan/ artifacts
+```
 
 ---
 
@@ -213,6 +246,29 @@ cosign verify-attestation --type vuln \
 
 ---
 
+## Known limitations & future work
+
+Conscious scope boundaries, named rather than left implicit:
+
+- **No automated test suite yet.** The deterministic modules (`dfc_runner`,
+  `dockerfile`, `wolfi_resolver`, `verifier`) are the natural unit-test candidates;
+  to date the agent is validated by live end-to-end runs, not a committed suite.
+- **Single target.** Only `uptime-kuma` is converted; the A/B/D failure classes are
+  the ones this target exercises. Other apps may surface other classes.
+- **Single architecture.** Images are built and scanned amd64-only; arm64 is future
+  work (a separate release job).
+- **Minimal Dockerfile parser.** `agent/dockerfile.py` models the subset needed here
+  (stages, `FROM`/`ARG`/`USER`, the edit-ops), not the full Dockerfile grammar.
+- **`Dockerfile.agent` is partial and not shipped.** It stops at the first
+  build-authoring wall by design; the signed artifact is the hand-built
+  `Dockerfile.hardened`.
+- **Residual npm CVEs are out of scope.** The 28 application-layer findings are
+  uptime-kuma's own npm dependencies — Chainguard Libraries' domain.
+- **melange/apko (Tier 2) not built.** Producer-side image authoring is a future
+  stretch, not implemented here.
+
+---
+
 ## Lineage
 
 Chainguard's 2022 "Secure Software Factory" (melange + apko) → 2026 AI-native
@@ -228,14 +284,15 @@ Built over a weekend, AI-accelerated. Every CVE number comes from real `grype` J
 on real images (regenerate with `scripts/gen_report.py`); the agent's autonomous
 fixes and the human touch-ups are tracked and attributed separately.
 
-Python is the agent's language. **melange/apko (Tier 2)** is out of scope here and
-noted as future work. The Go healthcheck is upstream's source compiled unchanged
-through Chainguard's toolchain.
+Python is the agent's language. The Go healthcheck is upstream's source compiled
+unchanged through Chainguard's toolchain.
 
 ## Repo layout
 
 ```
 forge/
+├── CONTEXT.md                   engineering design doc — the §-referenced spec
+├── forge_layers.py              shared OS/runtime-vs-application CVE classification
 ├── targets/uptime-kuma/
 │   ├── Dockerfile.upstream      input (no Chainguard image exists for it)
 │   ├── Dockerfile.converted     raw dfc output — the phantom base the agent fixes
