@@ -12,8 +12,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
-# Same OS/runtime decomposition the report uses (scripts/cve_summary.py) — keep in sync.
-OS_TYPES = {"deb", "apk", "rpm", "python", "go-module"}
+from forge_layers import OS_TYPES  # shared OS/runtime-vs-application classification
 
 
 @dataclass

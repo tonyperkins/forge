@@ -12,7 +12,11 @@ Assumes scans already produced under .scan/ and images present locally.
 from __future__ import annotations
 import json
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root on path
+from forge_layers import OS_TYPES  # shared OS/runtime-vs-application classification
 
 SCAN = Path(".scan")
 OUT = Path("docs/cve-report.md")
@@ -32,7 +36,18 @@ IMAGES = [
 ]
 
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
-OS_TYPES = {"deb", "apk", "rpm", "python", "go-module"}  # OS/runtime layer (image-hardening scope)
+
+
+def scan_provenance(grype_path: Path, sbom_path: Path):
+    """Read the scanned image digest + the tool versions straight from the scan
+    artifacts (grype/syft each embed a `descriptor`; grype records the image
+    `source.target`), so provenance is generated, never hand-typed (CONTEXT §10)."""
+    g = json.loads(grype_path.read_text())
+    s = json.loads(sbom_path.read_text())
+    t = g.get("source", {}).get("target", {})
+    return dict(manifest_digest=t.get("manifestDigest"), image_id=t.get("imageID"),
+                grype_ver=g.get("descriptor", {}).get("version"),
+                syft_ver=s.get("descriptor", {}).get("version"))
 
 
 def dedup_matches(grype: dict):
@@ -110,8 +125,9 @@ def main():
         cve = cve_stats(SCAN / grype)
         pkg = pkg_counts(SCAN / sbom)
         comp, uncomp = docker_sizes(ref)
+        prov = scan_provenance(SCAN / grype, SCAN / sbom)
         data.append(dict(label=label, ref=ref, role=role, cve=cve, pkg=pkg,
-                         comp=comp, uncomp=uncomp))
+                         comp=comp, uncomp=uncomp, prov=prov))
 
     ours = next(d for d in data if d["role"] == "ours")
     primary = next(d for d in data if d["role"] == "primary")
@@ -143,7 +159,7 @@ def main():
              f"({drop}).**\n")
 
     # --- the honest decomposition ---
-    L.append("## Where the reduction comes from (honest decomposition)\n")
+    L.append("## Where the reduction comes from\n")
     L.append("Splitting each image's CVEs into the **OS/runtime layer** (Debian/Wolfi packages, "
              "Go/Python runtime bits — *what image hardening actually addresses*) vs the "
              "**npm/application layer** (uptime-kuma's own dependency tree):\n")
@@ -159,10 +175,10 @@ def main():
              f"{primary['cve']['os_layer']['Critical']} Critical and "
              f"{primary['cve']['os_layer']['High']} High.")
     L.append(f"- **The npm/application layer is essentially unchanged "
-             f"({primary['cve']['npm_total']} → {ours['cve']['npm_total']}) — and that is correct.** "
+             f"({primary['cve']['npm_total']} → {ours['cve']['npm_total']}).** "
              f"Hardening the base image does not patch an app's npm dependencies; that is the "
-             f"domain of **Chainguard Libraries**, a separate product, and is explicitly out of "
-             f"scope here. We do not claim credit for it.")
+             f"domain of **Chainguard Libraries**, a separate product, and is out of "
+             f"scope here.")
     L.append(f"- Our {ours['cve']['npm_total']} residual findings are 100% npm "
              f"(e.g. `protobufjs`, `@grpc/grpc-js`, `tar`, `minimatch`) — all carried by "
              f"uptime-kuma itself; the upstream image carries the same class.\n")
@@ -180,10 +196,9 @@ def main():
              f"counts are close because it is the same application.\n")
 
     # --- size (presented honestly; not the lead) ---
-    L.append("## Size (presented plainly — not the headline)\n")
+    L.append("## Size\n")
     L.append("This target bundles every knex DB driver (e.g. `oracledb`'s five per-platform "
-             "prebuilts) and full i18n assets, so the size win is modest and real — not dramatic. "
-             "We report it straight rather than force a narrative the target can't support.\n")
+             "prebuilts) and full i18n assets, so the size reduction is modest.\n")
     L.append("| Image | Compressed (pull size) | Uncompressed |")
     L.append("|---|--:|--:|")
     for d in data:
@@ -197,6 +212,31 @@ def main():
              f"registry manifest's summed layer blobs); *uncompressed* = `docker history` layer "
              f"sum. `docker images` reports a larger uncompressed figure under the containerd "
              f"store; we cite the manifest-derived numbers as they reproduce from a registry.\n")
+
+    # --- provenance: exactly what was scanned, with what (read from the artifacts) ---
+    tools = ours["prov"]
+    L.append("## Provenance — exactly what was scanned\n")
+    L.append(f"- Tools: **syft `{tools['syft_ver']}`**, **grype `{tools['grype_ver']}`** "
+             f"(versions read from each scan's embedded `descriptor`). App version "
+             f"uptime-kuma 2.4.0 @ source commit `8d36977`. Architecture: amd64.")
+    L.append(f"- The hardened image scanned here is a **local amd64 build** of "
+             f"`targets/uptime-kuma/Dockerfile.hardened`. The image **shipped and signed in "
+             f"CI** is a separate build of the same Dockerfile + pinned upstream commit; it "
+             f"carries its own grype scan attached as a signed `cosign` attestation "
+             f"(`--type vuln`), independently verifiable on the published image.")
+    L.append("\nDigests of the exact images these numbers were scanned from "
+             "(`grype` records them in `source.target`):\n")
+    L.append("| Image | manifest digest | image ID (config) |")
+    L.append("|---|---|---|")
+    for d in data:
+        p = d["prov"]
+        L.append(f"| `{d['ref']}` | `{p['manifest_digest']}` | `{p['image_id']}` |")
+    L.append("")
+    L.append("To reproduce: pull/build the images above, then "
+             "`syft <img> -o json` + `grype <img> -o json` into `.scan/` and run "
+             "`python3 scripts/gen_report.py`. Every number in this file regenerates from "
+             "those artifacts.\n")
+
     OUT.write_text("\n".join(L) + "\n")
     print(f"wrote {OUT}")
 

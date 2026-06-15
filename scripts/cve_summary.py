@@ -10,9 +10,12 @@ Usage:  python3 scripts/cve_summary.py <grype.json> [image-label]
 from __future__ import annotations
 import sys
 import json
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root on path
+from forge_layers import OS_TYPES  # shared OS/runtime-vs-application classification
 
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
-OS_TYPES = {"deb", "apk", "rpm", "python", "go-module"}  # OS/runtime layer = image-hardening scope
 
 
 def main() -> None:
