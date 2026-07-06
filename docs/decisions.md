@@ -557,10 +557,6 @@ OS-layer 0 Crit/0 High). Class B (Wolfi apt→apk mappings) done separately and 
 attached and verified**; `cosign verify` + both `verify-attestation` pass. Identity
 `…/forge/.github/workflows/forge.yml@refs/heads/main`, issuer `token.actions.githubusercontent.com`.
 
-**Open owner action (only one):** ghcr package is still **private** — flip to Public
-(Package settings → Change visibility) or `gh auth refresh -s write:packages`. Needed for
-public verifiability / README verify command; not blocking the agent.
-
 **Locked headline numbers** (vs upstream `2.4.0-slim-rootless`, the same-scope baseline;
 real grype/syft, regen via `scripts/gen_report.py`):
 - **OS/runtime-layer CVEs 507 → 0** (the layer hardening targets) — *this is the headline lead*.
